@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local Claude Code config
+.claude/
+
+# Legacy data exports — contain student PII, never commit (repo is public)
+scripts/legacy_*.json

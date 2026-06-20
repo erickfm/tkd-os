@@ -32,7 +32,7 @@ export function SettingsPage() {
     <>
       <PageHeader
         title="Settings"
-        subtitle="Seeded belt ranks. Color tweaks come later."
+        subtitle="Belt ranks and their colors for each track."
       />
       <section className="space-y-8">
         <RankList title="Tiger Cubs Track" ranks={tiger} />
