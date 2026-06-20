@@ -43,6 +43,66 @@ async function regularWhiteBelt(): Promise<BeltRank> {
   return r;
 }
 
+// The sqlite-proxy client (client.ts) turns each result row into a positional
+// tuple via Object.values(). If a join selects two columns with the SAME output
+// name (e.g. students.id + belt_ranks.id, students.track + belt_ranks.track),
+// they collapse into one object key and every later column shifts left — which
+// silently corrupts belt fields (e.g. `degree` reads `color_hex`). To stay
+// collision-free, belt-rank columns are always projected under unique aliases
+// here and reassembled by toRank(). Do the same for any future joins.
+// IMPORTANT: these MUST be `sql\`…\`.as("rk_*")`, not bare `beltRanks.col`.
+// The sqlite-proxy maps results positionally and Drizzle emits NO column aliases
+// for a plain `{ rkId: beltRanks.id }` projection — so the SQL still contains
+// duplicate output names (students.id + belt_ranks.id) which tauri-plugin-sql
+// collapses into one object key, shifting every later field. Forcing an explicit
+// SQL alias via sql`…`.as() gives each belt column a unique output name.
+const rankCols = {
+  rkId: sql<number>`${beltRanks.id}`.as("rk_id"),
+  rkTrack: sql<string>`${beltRanks.track}`.as("rk_track"),
+  rkSortOrder: sql<number>`${beltRanks.sortOrder}`.as("rk_sort_order"),
+  rkName: sql<string>`${beltRanks.name}`.as("rk_name"),
+  rkClassGroup: sql<string | null>`${beltRanks.classGroup}`.as("rk_class_group"),
+  rkDegree: sql<string | null>`${beltRanks.degree}`.as("rk_degree"),
+  rkLevel: sql<string | null>`${beltRanks.level}`.as("rk_level"),
+  rkColorHex: sql<string>`${beltRanks.colorHex}`.as("rk_color_hex"),
+  rkTextHex: sql<string>`${beltRanks.textHex}`.as("rk_text_hex"),
+  rkBorderHex: sql<string>`${beltRanks.borderHex}`.as("rk_border_hex"),
+  rkIsGraduationRank: sql<boolean>`${beltRanks.isGraduationRank}`.as("rk_is_graduation_rank"),
+  rkNextRankId: sql<number | null>`${beltRanks.nextRankId}`.as("rk_next_rank_id"),
+} as const;
+
+type RankColsRow = {
+  rkId: number;
+  rkTrack: string;
+  rkSortOrder: number;
+  rkName: string;
+  rkClassGroup: string | null;
+  rkDegree: string | null;
+  rkLevel: string | null;
+  rkColorHex: string;
+  rkTextHex: string;
+  rkBorderHex: string;
+  rkIsGraduationRank: boolean;
+  rkNextRankId: number | null;
+};
+
+function toRank(x: RankColsRow): BeltRank {
+  return {
+    id: x.rkId,
+    track: x.rkTrack,
+    sortOrder: x.rkSortOrder,
+    name: x.rkName,
+    classGroup: x.rkClassGroup,
+    degree: x.rkDegree,
+    level: x.rkLevel,
+    colorHex: x.rkColorHex,
+    textHex: x.rkTextHex,
+    borderHex: x.rkBorderHex,
+    isGraduationRank: Boolean(x.rkIsGraduationRank),
+    nextRankId: x.rkNextRankId,
+  };
+}
+
 // ----------------------------------------------------------------------------
 // Students
 // ----------------------------------------------------------------------------
@@ -55,12 +115,12 @@ export interface StudentRow extends Student {
 export async function listStudents(): Promise<StudentRow[]> {
   const db = await getDb();
   const rows = await db
-    .select({ s: students, r: beltRanks, ptt: studentProgress.permissionToTest })
+    .select({ s: students, ...rankCols, ptt: studentProgress.permissionToTest })
     .from(students)
     .innerJoin(beltRanks, eq(students.beltRankId, beltRanks.id))
     .leftJoin(studentProgress, eq(studentProgress.studentId, students.id))
     .orderBy(asc(students.lastName), asc(students.firstName));
-  return rows.map((x) => ({ ...x.s, rank: x.r, permissionToTest: Boolean(x.ptt) }));
+  return rows.map((x) => ({ ...x.s, rank: toRank(x), permissionToTest: Boolean(x.ptt) }));
 }
 
 export interface StudentInput {
@@ -188,12 +248,13 @@ export interface PromotionResult {
 
 export async function listRankHistory(studentId: number) {
   const db = await getDb();
-  return db
-    .select({ h: rankHistory, to: beltRanks })
+  const rows = await db
+    .select({ h: rankHistory, ...rankCols })
     .from(rankHistory)
     .innerJoin(beltRanks, eq(rankHistory.toRankId, beltRanks.id))
     .where(eq(rankHistory.studentId, studentId))
     .orderBy(desc(rankHistory.promotionDate));
+  return rows.map((x) => ({ h: x.h, to: toRank(x) }));
 }
 
 /**
@@ -320,14 +381,14 @@ export async function setEventActive(id: number, active: boolean): Promise<void>
 export async function getEventRoster(eventId: number): Promise<StudentRow[]> {
   const db = await getDb();
   const rows = await db
-    .select({ s: students, r: beltRanks, ptt: studentProgress.permissionToTest })
+    .select({ s: students, ...rankCols, ptt: studentProgress.permissionToTest })
     .from(eventRoster)
     .innerJoin(students, eq(eventRoster.studentId, students.id))
     .innerJoin(beltRanks, eq(students.beltRankId, beltRanks.id))
     .leftJoin(studentProgress, eq(studentProgress.studentId, students.id))
     .where(eq(eventRoster.eventId, eventId))
     .orderBy(asc(beltRanks.sortOrder), asc(students.lastName));
-  return rows.map((x) => ({ ...x.s, rank: x.r, permissionToTest: Boolean(x.ptt) }));
+  return rows.map((x) => ({ ...x.s, rank: toRank(x), permissionToTest: Boolean(x.ptt) }));
 }
 
 export async function addToRoster(eventId: number, studentId: number): Promise<void> {
@@ -419,13 +480,13 @@ export async function studentsForClass(classType: ClassType): Promise<StudentRow
     );
   }
   const rows = await db
-    .select({ s: students, r: beltRanks, ptt: studentProgress.permissionToTest })
+    .select({ s: students, ...rankCols, ptt: studentProgress.permissionToTest })
     .from(students)
     .innerJoin(beltRanks, eq(students.beltRankId, beltRanks.id))
     .leftJoin(studentProgress, eq(studentProgress.studentId, students.id))
     .where(and(...conds))
     .orderBy(asc(beltRanks.sortOrder), asc(students.lastName));
-  return rows.map((x) => ({ ...x.s, rank: x.r, permissionToTest: Boolean(x.ptt) }));
+  return rows.map((x) => ({ ...x.s, rank: toRank(x), permissionToTest: Boolean(x.ptt) }));
 }
 
 export async function getSessionStatuses(
@@ -554,14 +615,14 @@ export async function setStarterCourseActive(id: number, active: boolean): Promi
 export async function getCourseEnrollment(courseId: number): Promise<StudentRow[]> {
   const db = await getDb();
   const rows = await db
-    .select({ s: students, r: beltRanks, ptt: studentProgress.permissionToTest })
+    .select({ s: students, ...rankCols, ptt: studentProgress.permissionToTest })
     .from(starterCourseEnrollment)
     .innerJoin(students, eq(starterCourseEnrollment.studentId, students.id))
     .innerJoin(beltRanks, eq(students.beltRankId, beltRanks.id))
     .leftJoin(studentProgress, eq(studentProgress.studentId, students.id))
     .where(eq(starterCourseEnrollment.courseId, courseId))
     .orderBy(asc(students.lastName));
-  return rows.map((x) => ({ ...x.s, rank: x.r, permissionToTest: Boolean(x.ptt) }));
+  return rows.map((x) => ({ ...x.s, rank: toRank(x), permissionToTest: Boolean(x.ptt) }));
 }
 
 export async function enrollInCourse(courseId: number, studentId: number): Promise<void> {
