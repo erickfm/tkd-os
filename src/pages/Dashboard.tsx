@@ -36,7 +36,7 @@ export function DashboardPage() {
         <>
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <Stat icon={<Users size={18} />} label="Active Students" value={stats?.activeTotal} onClick={() => navigate("/students")} />
-            <Stat icon={<Sparkles size={18} />} label="Tiger Cubs" value={stats?.tiger} onClick={() => navigate("/students?track=tiger")} />
+            <Stat icon={<span className="text-base leading-none">🐯</span>} label="Tiger Cubs" value={stats?.tiger} onClick={() => navigate("/students?track=tiger")} />
             <Stat icon={<Users size={18} />} label="Jr./Adult" value={stats?.regular} onClick={() => navigate("/students?track=regular")} />
             <Stat icon={<GraduationCap size={18} />} label="Black Belts" value={stats?.black} onClick={() => navigate("/students?filter=black")} />
             <Stat icon={<Award size={18} />} label="Ready to Test" value={stats?.permissionToTest} accent onClick={() => navigate("/students?filter=ptt")} />
