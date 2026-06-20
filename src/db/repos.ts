@@ -49,16 +49,18 @@ async function regularWhiteBelt(): Promise<BeltRank> {
 
 export interface StudentRow extends Student {
   rank: BeltRank;
+  permissionToTest: boolean;
 }
 
 export async function listStudents(): Promise<StudentRow[]> {
   const db = await getDb();
   const rows = await db
-    .select({ s: students, r: beltRanks })
+    .select({ s: students, r: beltRanks, ptt: studentProgress.permissionToTest })
     .from(students)
     .innerJoin(beltRanks, eq(students.beltRankId, beltRanks.id))
+    .leftJoin(studentProgress, eq(studentProgress.studentId, students.id))
     .orderBy(asc(students.lastName), asc(students.firstName));
-  return rows.map((x) => ({ ...x.s, rank: x.r }));
+  return rows.map((x) => ({ ...x.s, rank: x.r, permissionToTest: Boolean(x.ptt) }));
 }
 
 export interface StudentInput {
@@ -318,13 +320,14 @@ export async function setEventActive(id: number, active: boolean): Promise<void>
 export async function getEventRoster(eventId: number): Promise<StudentRow[]> {
   const db = await getDb();
   const rows = await db
-    .select({ s: students, r: beltRanks })
+    .select({ s: students, r: beltRanks, ptt: studentProgress.permissionToTest })
     .from(eventRoster)
     .innerJoin(students, eq(eventRoster.studentId, students.id))
     .innerJoin(beltRanks, eq(students.beltRankId, beltRanks.id))
+    .leftJoin(studentProgress, eq(studentProgress.studentId, students.id))
     .where(eq(eventRoster.eventId, eventId))
     .orderBy(asc(beltRanks.sortOrder), asc(students.lastName));
-  return rows.map((x) => ({ ...x.s, rank: x.r }));
+  return rows.map((x) => ({ ...x.s, rank: x.r, permissionToTest: Boolean(x.ptt) }));
 }
 
 export async function addToRoster(eventId: number, studentId: number): Promise<void> {
@@ -416,12 +419,13 @@ export async function studentsForClass(classType: ClassType): Promise<StudentRow
     );
   }
   const rows = await db
-    .select({ s: students, r: beltRanks })
+    .select({ s: students, r: beltRanks, ptt: studentProgress.permissionToTest })
     .from(students)
     .innerJoin(beltRanks, eq(students.beltRankId, beltRanks.id))
+    .leftJoin(studentProgress, eq(studentProgress.studentId, students.id))
     .where(and(...conds))
     .orderBy(asc(beltRanks.sortOrder), asc(students.lastName));
-  return rows.map((x) => ({ ...x.s, rank: x.r }));
+  return rows.map((x) => ({ ...x.s, rank: x.r, permissionToTest: Boolean(x.ptt) }));
 }
 
 export async function getSessionStatuses(
@@ -498,22 +502,17 @@ export interface DashboardStats {
 }
 
 export async function getDashboardStats(): Promise<DashboardStats> {
-  const db = await getDb();
   const all = await listStudents();
   const active = all.filter((s) => s.isActive);
   const t = today();
   const evs = await listEvents();
   const courses = await listStarterCourses();
-  const [ptt] = await db
-    .select({ n: sql<number>`count(*)` })
-    .from(studentProgress)
-    .where(eq(studentProgress.permissionToTest, true));
   return {
     activeTotal: active.length,
     tiger: active.filter((s) => s.track === "tiger").length,
     regular: active.filter((s) => s.track === "regular").length,
     black: active.filter((s) => s.rank.degree != null).length,
-    permissionToTest: Number(ptt?.n ?? 0),
+    permissionToTest: active.filter((s) => s.permissionToTest).length,
     upcomingEvents: evs.filter((e) => e.isActive && e.eventDate >= t).length,
     activeCourses: courses.filter((c) => c.endDate >= t).length,
   };
@@ -555,13 +554,14 @@ export async function setStarterCourseActive(id: number, active: boolean): Promi
 export async function getCourseEnrollment(courseId: number): Promise<StudentRow[]> {
   const db = await getDb();
   const rows = await db
-    .select({ s: students, r: beltRanks })
+    .select({ s: students, r: beltRanks, ptt: studentProgress.permissionToTest })
     .from(starterCourseEnrollment)
     .innerJoin(students, eq(starterCourseEnrollment.studentId, students.id))
     .innerJoin(beltRanks, eq(students.beltRankId, beltRanks.id))
+    .leftJoin(studentProgress, eq(studentProgress.studentId, students.id))
     .where(eq(starterCourseEnrollment.courseId, courseId))
     .orderBy(asc(students.lastName));
-  return rows.map((x) => ({ ...x.s, rank: x.r }));
+  return rows.map((x) => ({ ...x.s, rank: x.r, permissionToTest: Boolean(x.ptt) }));
 }
 
 export async function enrollInCourse(courseId: number, studentId: number): Promise<void> {

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Plus, UserCog } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
+import { Plus, UserCog, X } from "lucide-react";
 
 import { PageHeader } from "@/components/PageHeader";
 import { BeltBadge } from "@/components/BeltBadge";
@@ -15,16 +16,32 @@ import type { BeltRank } from "@/db/schema";
 import { AGE_GROUP_LABEL, prettyDate, TRACK_LABEL } from "@/lib/format";
 
 type TrackFilter = "all" | "regular" | "tiger";
+type Special = "all" | "black" | "ptt";
+
+const SPECIAL_LABEL: Record<Exclude<Special, "all">, string> = {
+  black: "Black belts",
+  ptt: "Ready to test",
+};
 
 export function StudentsPage() {
+  const [params, setParams] = useSearchParams();
   const [rows, setRows] = useState<StudentRow[] | null>(null);
   const [ranks, setRanks] = useState<BeltRank[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [track, setTrack] = useState<TrackFilter>("all");
+  const [special, setSpecial] = useState<Special>("all");
   const [showInactive, setShowInactive] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editing, setEditing] = useState<StudentRow | null>(null);
+
+  // Apply incoming filters from dashboard drill-downs (once per param change).
+  useEffect(() => {
+    const t = params.get("track");
+    if (t === "tiger" || t === "regular") setTrack(t);
+    const f = params.get("filter");
+    if (f === "black" || f === "ptt") setSpecial(f);
+  }, [params]);
 
   async function load() {
     try {
@@ -43,11 +60,21 @@ export function StudentsPage() {
     return rows
       .filter((r) => (showInactive ? true : r.isActive))
       .filter((r) => (track === "all" ? true : r.track === track))
+      .filter((r) =>
+        special === "all" ? true
+          : special === "black" ? r.rank.degree != null
+          : r.permissionToTest)
       .filter((r) => q === "" ? true : `${r.firstName} ${r.lastName}`.toLowerCase().includes(q));
-  }, [rows, search, track, showInactive]);
+  }, [rows, search, track, special, showInactive]);
 
   function openNew() { setEditing(null); setDrawerOpen(true); }
   function openEdit(r: StudentRow) { setEditing(r); setDrawerOpen(true); }
+
+  function clearSpecial() {
+    setSpecial("all");
+    params.delete("filter");
+    setParams(params, { replace: true });
+  }
 
   async function flagAdults() {
     const n = await autoFlagAdultsByDob(18);
@@ -87,6 +114,12 @@ export function StudentsPage() {
               { value: "regular", label: "Jr./Adult" },
               { value: "tiger", label: "Tiger Cubs" },
             ]} />
+            {special !== "all" && (
+              <button onClick={clearSpecial}
+                className="inline-flex items-center gap-1 rounded-full border border-[var(--color-brand)] bg-[var(--color-brand)]/10 px-3 py-1 text-sm text-[var(--color-brand)]">
+                {SPECIAL_LABEL[special]} <X size={14} />
+              </button>
+            )}
             <label className="ml-auto flex items-center gap-2 text-sm text-[var(--color-fg-muted)]">
               <input type="checkbox" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} className="accent-[var(--color-brand)]" />
               Show inactive
@@ -106,7 +139,10 @@ export function StudentsPage() {
                 <tbody>
                   {filtered.map((r) => (
                     <tr key={r.id} onClick={() => openEdit(r)} className="cursor-pointer border-t border-[var(--color-border)] hover:bg-[var(--color-surface-2)]">
-                      <Td><span className={r.isActive ? "" : "opacity-50 line-through"}>{r.firstName} {r.lastName}</span></Td>
+                      <Td>
+                        <span className={r.isActive ? "" : "opacity-50 line-through"}>{r.firstName} {r.lastName}</span>
+                        {r.permissionToTest && <span className="ml-2 rounded-full bg-[var(--color-brand)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-brand)]">PTT</span>}
+                      </Td>
                       <Td><BeltBadge rank={r.rank} size="sm" /></Td>
                       <Td>{TRACK_LABEL[r.track]}</Td>
                       <Td>{r.track === "tiger" ? "—" : AGE_GROUP_LABEL[r.ageGroup]}</Td>

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Award, CalendarDays, GraduationCap, Sparkles, Users } from "lucide-react";
 
 import { PageHeader } from "@/components/PageHeader";
@@ -7,6 +8,7 @@ import type { EventRow } from "@/db/schema";
 import { prettyDate, today } from "@/lib/format";
 
 export function DashboardPage() {
+  const navigate = useNavigate();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [upcoming, setUpcoming] = useState<EventRow[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -33,13 +35,13 @@ export function DashboardPage() {
       {!error && (
         <>
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-            <Stat icon={<Users size={18} />} label="Active Students" value={stats?.activeTotal} />
-            <Stat icon={<Sparkles size={18} />} label="Tiger Cubs" value={stats?.tiger} />
-            <Stat icon={<Users size={18} />} label="Jr./Adult" value={stats?.regular} />
-            <Stat icon={<GraduationCap size={18} />} label="Black Belts" value={stats?.black} />
-            <Stat icon={<Award size={18} />} label="Ready to Test" value={stats?.permissionToTest} accent />
-            <Stat icon={<CalendarDays size={18} />} label="Upcoming Events" value={stats?.upcomingEvents} />
-            <Stat icon={<Sparkles size={18} />} label="Active Courses" value={stats?.activeCourses} />
+            <Stat icon={<Users size={18} />} label="Active Students" value={stats?.activeTotal} onClick={() => navigate("/students")} />
+            <Stat icon={<Sparkles size={18} />} label="Tiger Cubs" value={stats?.tiger} onClick={() => navigate("/students?track=tiger")} />
+            <Stat icon={<Users size={18} />} label="Jr./Adult" value={stats?.regular} onClick={() => navigate("/students?track=regular")} />
+            <Stat icon={<GraduationCap size={18} />} label="Black Belts" value={stats?.black} onClick={() => navigate("/students?filter=black")} />
+            <Stat icon={<Award size={18} />} label="Ready to Test" value={stats?.permissionToTest} accent onClick={() => navigate("/students?filter=ptt")} />
+            <Stat icon={<CalendarDays size={18} />} label="Upcoming Events" value={stats?.upcomingEvents} onClick={() => navigate("/events")} />
+            <Stat icon={<Sparkles size={18} />} label="Active Courses" value={stats?.activeCourses} onClick={() => navigate("/starter-courses")} />
           </div>
 
           <h2 className="mb-3 mt-8 text-lg font-semibold tracking-tight">Upcoming events</h2>
@@ -52,7 +54,7 @@ export function DashboardPage() {
               <table className="w-full text-sm">
                 <tbody>
                   {upcoming.map((e) => (
-                    <tr key={e.id} className="border-t border-[var(--color-border)] first:border-t-0">
+                    <tr key={e.id} onClick={() => navigate("/events")} className="cursor-pointer border-t border-[var(--color-border)] first:border-t-0 hover:bg-[var(--color-surface-2)]">
                       <td className="px-4 py-3 font-medium">{e.name}</td>
                       <td className="px-4 py-3 text-[var(--color-fg-muted)]">{e.eventType}</td>
                       <td className="px-4 py-3 text-right">{prettyDate(e.eventDate)}</td>
@@ -68,14 +70,17 @@ export function DashboardPage() {
   );
 }
 
-function Stat({ icon, label, value, accent }: { icon: React.ReactNode; label: string; value: number | undefined; accent?: boolean }) {
+function Stat({ icon, label, value, accent, onClick }: {
+  icon: React.ReactNode; label: string; value: number | undefined; accent?: boolean; onClick?: () => void;
+}) {
   return (
-    <div className={`rounded-lg border p-5 ${accent ? "border-[var(--color-brand)]/40 bg-[var(--color-brand)]/5" : "border-[var(--color-border)] bg-[var(--color-surface-2)]"}`}>
+    <button onClick={onClick} disabled={!onClick}
+      className={`rounded-lg border p-5 text-left transition enabled:hover:border-[var(--color-brand)] enabled:hover:shadow-sm ${accent ? "border-[var(--color-brand)]/40 bg-[var(--color-brand)]/5" : "border-[var(--color-border)] bg-[var(--color-surface-2)]"}`}>
       <div className="flex items-center gap-2 text-sm text-[var(--color-fg-muted)]">
         <span className={accent ? "text-[var(--color-brand)]" : ""}>{icon}</span>
         {label}
       </div>
       <div className="mt-2 text-3xl font-semibold tracking-tight">{value ?? "—"}</div>
-    </div>
+    </button>
   );
 }
