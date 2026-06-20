@@ -14,7 +14,9 @@ export function AppLayout() {
     <div className="flex h-full">
       <aside className="w-56 shrink-0 border-r border-[var(--color-border)] bg-[var(--color-surface-2)]">
         <div className="px-5 py-5">
-          <div className="text-lg font-semibold tracking-tight">TKD OS</div>
+          <div className="font-serif text-xl tracking-tight">
+            <span className="text-[var(--color-brand)]">TKD</span> OS
+          </div>
           <div className="text-xs text-[var(--color-fg-muted)]">
             Dojang Manager
           </div>
