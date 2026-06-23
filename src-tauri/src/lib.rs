@@ -15,6 +15,18 @@ pub fn run() {
             sql: include_str!("../migrations/0002_belt_colors.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 3,
+            description: "guardians",
+            sql: include_str!("../migrations/0003_guardians.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 4,
+            description: "testing_cycle",
+            sql: include_str!("../migrations/0004_testing_cycle.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()

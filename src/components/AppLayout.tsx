@@ -7,6 +7,7 @@ const NAV = [
   { to: "/dashboard", label: "Dashboard" },
   { to: "/students", label: "Students" },
   { to: "/attendance", label: "Attendance" },
+  { to: "/testing-cycle", label: "Testing Cycle" },
   { to: "/events", label: "Events" },
   { to: "/starter-courses", label: "Starter Courses" },
   { to: "/settings", label: "Settings" },

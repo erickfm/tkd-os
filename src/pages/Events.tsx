@@ -1,24 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
-import { Award, Download, Plus, Trash2, UserPlus } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 
 import { PageHeader } from "@/components/PageHeader";
 import { BeltBadge } from "@/components/BeltBadge";
 import { Drawer } from "@/components/Drawer";
-import { Button, EmptyState, Select } from "@/components/ui";
+import { Button, EmptyState } from "@/components/ui";
+import { StudentSearchAdd } from "@/components/StudentSearchAdd";
 import { EventForm } from "./EventForm";
 import {
   addToRoster,
-  autoPromoteEvent,
-  buildTestingRosterTsv,
   getEventRoster,
   listEvents,
   listStudents,
   removeFromRoster,
-  type PromotionResult,
   type StudentRow,
 } from "@/db/repos";
 import type { EventRow } from "@/db/schema";
-import { downloadText } from "@/lib/download";
 import { prettyDate } from "@/lib/format";
 
 export function EventsPage() {
@@ -38,14 +35,14 @@ export function EventsPage() {
     <>
       <PageHeader
         title="Events"
-        subtitle="Belt testings, seminars, tournaments, demos, and camps."
+        subtitle="Seminars, tournaments, demos, and camps."
         actions={<Button variant="primary" onClick={() => { setEditing(null); setFormOpen(true); }}><Plus size={16} />Add event</Button>}
       />
 
       {error && <div className="rounded-md border border-red-500/40 bg-red-500/10 p-4 text-sm">{error}</div>}
 
       {!error && evts && evts.length === 0 && (
-        <EmptyState title="No events yet">Create a belt testing, tournament, or seminar to get started.</EmptyState>
+        <EmptyState title="No events yet">Create a tournament, seminar, or demo to get started.</EmptyState>
       )}
 
       {!error && evts && evts.length > 0 && (
@@ -84,9 +81,6 @@ export function EventsPage() {
 function EventDetail({ event, onClose, onEdit }: { event: EventRow; onClose: () => void; onEdit: () => void }) {
   const [roster, setRoster] = useState<StudentRow[]>([]);
   const [allStudents, setAllStudents] = useState<StudentRow[]>([]);
-  const [toAdd, setToAdd] = useState<number | "">("");
-  const [results, setResults] = useState<PromotionResult[] | null>(null);
-  const [busy, setBusy] = useState(false);
 
   async function load() {
     const [r, all] = await Promise.all([getEventRoster(event.id), listStudents()]);
@@ -100,33 +94,13 @@ function EventDetail({ event, onClose, onEdit }: { event: EventRow; onClose: () 
     return allStudents.filter((s) => s.isActive && !on.has(s.id));
   }, [roster, allStudents]);
 
-  const isTesting = event.eventType === "Belt Testing";
-
-  async function add() {
-    if (toAdd === "") return;
-    await addToRoster(event.id, Number(toAdd));
-    setToAdd("");
+  async function add(studentId: number) {
+    await addToRoster(event.id, studentId);
     await load();
   }
   async function remove(studentId: number) {
     await removeFromRoster(event.id, studentId);
     await load();
-  }
-  async function promote() {
-    if (!confirm(`Auto-promote all ${roster.length} students on this roster to their next belt? This cannot be undone.`)) return;
-    setBusy(true);
-    try {
-      const res = await autoPromoteEvent(event.id);
-      setResults(res);
-      await load();
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function exportTsv() {
-    const tsv = await buildTestingRosterTsv(event.id);
-    const safe = event.name.replace(/[^a-z0-9]+/gi, "_");
-    downloadText(`${safe}_roster.tsv`, tsv);
   }
 
   return (
@@ -134,12 +108,6 @@ function EventDetail({ event, onClose, onEdit }: { event: EventRow; onClose: () 
       footer={
         <div className="flex items-center justify-between">
           <Button variant="ghost" onClick={onEdit}>Edit details</Button>
-          {isTesting && (
-            <div className="flex gap-2">
-              <Button variant="secondary" onClick={exportTsv} disabled={roster.length === 0}><Download size={16} />Export TSV</Button>
-              <Button variant="primary" onClick={promote} disabled={busy || roster.length === 0}><Award size={16} />{busy ? "Promoting…" : "Auto-promote all"}</Button>
-            </div>
-          )}
         </div>
       }>
       <div className="mb-4 text-sm text-[var(--color-fg-muted)]">
@@ -148,28 +116,7 @@ function EventDetail({ event, onClose, onEdit }: { event: EventRow; onClose: () 
       </div>
       {event.notes && <p className="mb-4 whitespace-pre-wrap text-sm">{event.notes}</p>}
 
-      {results && (
-        <div className="mb-4 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3 text-sm">
-          <div className="mb-2 font-medium">Promotion results</div>
-          <ul className="space-y-1">
-            {results.map((r) => (
-              <li key={r.studentId}>
-                {r.skipped
-                  ? <span className="text-[var(--color-fg-muted)]">{r.name} — skipped ({r.skipped})</span>
-                  : <span>{r.name}: {r.previousBelt} → <strong>{r.newBelt}</strong>{r.graduated ? " 🎓 graduated" : ""}</span>}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <div className="mb-3 flex items-center gap-2">
-        <Select value={toAdd} onChange={(e) => setToAdd(e.target.value === "" ? "" : Number(e.target.value))} className="flex-1">
-          <option value="">Add a student to the roster…</option>
-          {addable.map((s) => <option key={s.id} value={s.id}>{s.firstName} {s.lastName} — {s.rank.name}</option>)}
-        </Select>
-        <Button variant="secondary" onClick={add} disabled={toAdd === ""}><UserPlus size={16} />Add</Button>
-      </div>
+      <StudentSearchAdd students={addable} onAdd={add} placeholder="Type a name to add to the roster…" />
 
       <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
         <table className="w-full text-sm">

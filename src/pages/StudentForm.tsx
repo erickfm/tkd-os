@@ -34,6 +34,8 @@ interface Props {
 function blank(): StudentInput {
   return {
     firstName: "", lastName: "", dateOfBirth: null, phone: null, email: null,
+    guardian1Name: null, guardian1Phone: null, guardian1Email: null,
+    guardian2Name: null, guardian2Phone: null, guardian2Email: null,
     emergencyContact: null, track: "regular", ageGroup: "jr",
     beltRankId: 0, beltSize: null, joinDate: today(), notes: null,
   };
@@ -53,7 +55,12 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
         ? {
             firstName: editing.firstName, lastName: editing.lastName,
             dateOfBirth: editing.dateOfBirth, phone: editing.phone,
-            email: editing.email, emergencyContact: editing.emergencyContact,
+            email: editing.email,
+            guardian1Name: editing.guardian1Name, guardian1Phone: editing.guardian1Phone,
+            guardian1Email: editing.guardian1Email,
+            guardian2Name: editing.guardian2Name, guardian2Phone: editing.guardian2Phone,
+            guardian2Email: editing.guardian2Email,
+            emergencyContact: editing.emergencyContact,
             track: editing.track, ageGroup: editing.ageGroup,
             beltRankId: editing.beltRankId, beltSize: editing.beltSize,
             joinDate: editing.joinDate, notes: editing.notes,
@@ -207,6 +214,24 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
       <div className="grid grid-cols-2 gap-x-3">
         <Field label="Phone"><TextInput value={form.phone ?? ""} onChange={(e) => set("phone", e.target.value || null)} /></Field>
         <Field label="Email"><TextInput value={form.email ?? ""} onChange={(e) => set("email", e.target.value || null)} /></Field>
+      </div>
+
+      <div className="mb-3 rounded-md border border-[var(--color-border)] p-3">
+        <div className="mb-2 text-sm font-medium">Guardian 1</div>
+        <Field label="Name"><TextInput value={form.guardian1Name ?? ""} onChange={(e) => set("guardian1Name", e.target.value || null)} /></Field>
+        <div className="grid grid-cols-2 gap-x-3">
+          <Field label="Phone"><TextInput value={form.guardian1Phone ?? ""} onChange={(e) => set("guardian1Phone", e.target.value || null)} /></Field>
+          <Field label="Email"><TextInput value={form.guardian1Email ?? ""} onChange={(e) => set("guardian1Email", e.target.value || null)} /></Field>
+        </div>
+      </div>
+
+      <div className="mb-3 rounded-md border border-[var(--color-border)] p-3">
+        <div className="mb-2 text-sm font-medium">Guardian 2</div>
+        <Field label="Name"><TextInput value={form.guardian2Name ?? ""} onChange={(e) => set("guardian2Name", e.target.value || null)} /></Field>
+        <div className="grid grid-cols-2 gap-x-3">
+          <Field label="Phone"><TextInput value={form.guardian2Phone ?? ""} onChange={(e) => set("guardian2Phone", e.target.value || null)} /></Field>
+          <Field label="Email"><TextInput value={form.guardian2Email ?? ""} onChange={(e) => set("guardian2Email", e.target.value || null)} /></Field>
+        </div>
       </div>
 
       <Field label="Emergency contact">

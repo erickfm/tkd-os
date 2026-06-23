@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, lte, sql } from "drizzle-orm";
 
 import { getDb } from "./client";
 import {
@@ -12,8 +12,10 @@ import {
   starterCourses,
   studentProgress,
   students,
+  testingCycles,
+  testingRegistration,
 } from "./schema";
-import type { BeltRank, Student } from "./schema";
+import type { BeltRank, Student, TestingCycle } from "./schema";
 import { ageFromDob, today } from "@/lib/format";
 
 // ----------------------------------------------------------------------------
@@ -129,6 +131,12 @@ export interface StudentInput {
   dateOfBirth: string | null;
   phone: string | null;
   email: string | null;
+  guardian1Name: string | null;
+  guardian1Phone: string | null;
+  guardian1Email: string | null;
+  guardian2Name: string | null;
+  guardian2Phone: string | null;
+  guardian2Email: string | null;
   emergencyContact: string | null;
   track: string;
   ageGroup: string;
@@ -403,34 +411,175 @@ export async function removeFromRoster(eventId: number, studentId: number): Prom
     .where(and(eq(eventRoster.eventId, eventId), eq(eventRoster.studentId, studentId)));
 }
 
-/** Auto-promote everyone on a Belt Testing roster, lowest rank first. */
-export async function autoPromoteEvent(eventId: number): Promise<PromotionResult[]> {
-  const roster = await getEventRoster(eventId); // already sorted by sort_order asc
+// ----------------------------------------------------------------------------
+// Testing cycle (current testing period + registration list)
+// ----------------------------------------------------------------------------
+
+/** The single active testing cycle, creating a default one if none exists. */
+export async function getCurrentCycle(): Promise<TestingCycle> {
+  const db = await getDb();
+  const [existing] = await db
+    .select()
+    .from(testingCycles)
+    .where(eq(testingCycles.isActive, true))
+    .orderBy(desc(testingCycles.id))
+    .limit(1);
+  if (existing) return existing;
+  const start = today();
+  const [row] = await db
+    .insert(testingCycles)
+    .values({ startDate: start, endDate: start })
+    .returning();
+  return row;
+}
+
+export async function updateCycleDates(
+  id: number,
+  startDate: string,
+  endDate: string,
+): Promise<void> {
+  const db = await getDb();
+  await db
+    .update(testingCycles)
+    .set({ startDate, endDate, updatedAt: sql`CURRENT_TIMESTAMP` })
+    .where(eq(testingCycles.id, id));
+}
+
+export async function registerToTest(cycleId: number, studentId: number): Promise<void> {
+  const db = await getDb();
+  await db.insert(testingRegistration).values({ cycleId, studentId });
+}
+
+export async function unregisterFromTest(cycleId: number, studentId: number): Promise<void> {
+  const db = await getDb();
+  await db
+    .delete(testingRegistration)
+    .where(
+      and(
+        eq(testingRegistration.cycleId, cycleId),
+        eq(testingRegistration.studentId, studentId),
+      ),
+    );
+}
+
+export interface TestingRow extends StudentRow {
+  greenStripe: boolean;
+  blueStripe: boolean;
+  orangeStripe: boolean;
+  redStripe: boolean;
+  attendanceThisCycle: number;
+  testingFor: string | null;
+}
+
+/** Registered students for a cycle, with their stripes + cycle attendance count. */
+export async function getCycleRegistrations(cycleId: number): Promise<TestingRow[]> {
+  const db = await getDb();
+  const cycle = await getCycleById(cycleId);
+  const rows = await db
+    .select({
+      s: students,
+      ...rankCols,
+      green: studentProgress.greenStripe,
+      blue: studentProgress.blueStripe,
+      orange: studentProgress.orangeStripe,
+      red: studentProgress.redStripe,
+      ptt: studentProgress.permissionToTest,
+    })
+    .from(testingRegistration)
+    .innerJoin(students, eq(testingRegistration.studentId, students.id))
+    .innerJoin(beltRanks, eq(students.beltRankId, beltRanks.id))
+    .leftJoin(studentProgress, eq(studentProgress.studentId, students.id))
+    .where(eq(testingRegistration.cycleId, cycleId))
+    .orderBy(asc(beltRanks.sortOrder), asc(students.lastName));
+
+  const ids = rows.map((x) => x.s.id);
+  const attendance = await presentCountsInRange(ids, cycle.startDate, cycle.endDate);
+  const ranks = await listBeltRanks();
+  const rankById = new Map(ranks.map((r) => [r.id, r]));
+
+  return rows.map((x) => {
+    const rank = toRank(x);
+    const next = rank.nextRankId ? rankById.get(rank.nextRankId) : null;
+    return {
+      ...x.s,
+      rank,
+      permissionToTest: Boolean(x.ptt),
+      greenStripe: Boolean(x.green),
+      blueStripe: Boolean(x.blue),
+      orangeStripe: Boolean(x.orange),
+      redStripe: Boolean(x.red),
+      attendanceThisCycle: attendance.get(x.s.id) ?? 0,
+      testingFor: next ? next.name : null,
+    };
+  });
+}
+
+async function getCycleById(id: number): Promise<TestingCycle> {
+  const db = await getDb();
+  const [c] = await db.select().from(testingCycles).where(eq(testingCycles.id, id));
+  return c;
+}
+
+/** Present-class counts per student within [start, end], as a studentId -> count map. */
+async function presentCountsInRange(
+  studentIds: number[],
+  start: string,
+  end: string,
+): Promise<Map<number, number>> {
+  if (studentIds.length === 0) return new Map();
+  const db = await getDb();
+  const rows = await db
+    .select({
+      studentId: attendanceRecords.studentId,
+      n: sql<number>`count(*)`,
+    })
+    .from(attendanceRecords)
+    .innerJoin(
+      attendanceSessions,
+      eq(attendanceRecords.sessionId, attendanceSessions.id),
+    )
+    .where(
+      and(
+        inArray(attendanceRecords.studentId, studentIds),
+        eq(attendanceRecords.status, "present"),
+        gte(attendanceSessions.sessionDate, start),
+        lte(attendanceSessions.sessionDate, end),
+      ),
+    )
+    .groupBy(attendanceRecords.studentId);
+  return new Map(rows.map((r) => [r.studentId, Number(r.n)]));
+}
+
+/**
+ * Promote every registered student one rank (lowest rank first), then clear the
+ * registration list so the cycle is ready for the next round and no one is
+ * promoted twice. Reuses promoteStudent (logs rank_history, handles graduation).
+ */
+export async function promoteCycle(cycleId: number): Promise<PromotionResult[]> {
+  const roster = await getCycleRegistrations(cycleId); // sorted by sort_order asc
   const results: PromotionResult[] = [];
   for (const s of roster) {
-    results.push(await promoteStudent(s.id, { date: undefined, eventId }));
+    results.push(await promoteStudent(s.id, { eventId: null }));
   }
+  const db = await getDb();
+  await db
+    .delete(testingRegistration)
+    .where(eq(testingRegistration.cycleId, cycleId));
   return results;
 }
 
-/** Tab-separated testing-roster export, ordered by belt sort_order (spec §13). */
-export async function buildTestingRosterTsv(eventId: number): Promise<string> {
-  const roster = await getEventRoster(eventId);
-  const ranks = await listBeltRanks();
-  const byId = new Map(ranks.map((r) => [r.id, r]));
-  const header = ["Name", "Track", "Age Group", "Current Belt", "Testing For", "Belt Size", "Phone", "Email"];
+/** Tab-separated export of the testing list: name, age, current belt, testing-for. */
+export async function buildTestingCycleTsv(cycleId: number): Promise<string> {
+  const roster = await getCycleRegistrations(cycleId);
+  const header = ["Name", "Age", "Current Belt", "Testing For"];
   const lines = [header.join("\t")];
   for (const s of roster) {
-    const next = s.rank.nextRankId ? byId.get(s.rank.nextRankId) : null;
+    const age = ageFromDob(s.dateOfBirth);
     lines.push([
       `${s.firstName} ${s.lastName}`,
-      s.track === "tiger" ? "Tiger Cubs" : "Jr./Adult",
-      s.track === "tiger" ? "" : s.ageGroup === "adult" ? "Adult" : "Jr.",
+      age == null ? "" : String(age),
       s.rank.name,
-      next ? next.name : "(top rank)",
-      s.beltSize ?? "",
-      s.phone ?? "",
-      s.email ?? "",
+      s.testingFor ?? "(top rank)",
     ].join("\t"));
   }
   return lines.join("\n");

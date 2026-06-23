@@ -29,6 +29,7 @@ export function StudentsPage() {
   const [ranks, setRanks] = useState<BeltRank[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<"name" | "rank">("name");
   const [track, setTrack] = useState<TrackFilter>("all");
   const [special, setSpecial] = useState<Special>("all");
   const [showInactive, setShowInactive] = useState(false);
@@ -57,7 +58,7 @@ export function StudentsPage() {
   const filtered = useMemo(() => {
     if (!rows) return [];
     const q = search.trim().toLowerCase();
-    return rows
+    const out = rows
       .filter((r) => (showInactive ? true : r.isActive))
       .filter((r) => (track === "all" ? true : r.track === track))
       .filter((r) =>
@@ -65,7 +66,18 @@ export function StudentsPage() {
           : special === "black" ? r.rank.degree != null
           : r.permissionToTest)
       .filter((r) => q === "" ? true : `${r.firstName} ${r.lastName}`.toLowerCase().includes(q));
-  }, [rows, search, track, special, showInactive]);
+    out.sort((a, b) => {
+      if (sort === "rank") {
+        if (a.rank.track !== b.rank.track) return a.rank.track.localeCompare(b.rank.track);
+        if (a.rank.sortOrder !== b.rank.sortOrder) return a.rank.sortOrder - b.rank.sortOrder;
+      }
+      return (
+        a.lastName.localeCompare(b.lastName) ||
+        a.firstName.localeCompare(b.firstName)
+      );
+    });
+    return out;
+  }, [rows, search, sort, track, special, showInactive]);
 
   function openNew() { setEditing(null); setDrawerOpen(true); }
   function openEdit(r: StudentRow) { setEditing(r); setDrawerOpen(true); }
@@ -113,6 +125,10 @@ export function StudentsPage() {
               { value: "all", label: "All" },
               { value: "regular", label: "Jr./Adult" },
               { value: "tiger", label: "Tiger Cubs" },
+            ]} />
+            <Segmented value={sort} onChange={setSort} options={[
+              { value: "name", label: "By name" },
+              { value: "rank", label: "By rank" },
             ]} />
             {special !== "all" && (
               <button onClick={clearSpecial}
