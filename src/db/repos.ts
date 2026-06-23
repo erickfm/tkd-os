@@ -461,16 +461,24 @@ export async function getCurrentCycle(): Promise<TestingCycle> {
   return row;
 }
 
-export async function updateCycleDates(
+export async function updateCycle(
   id: number,
   startDate: string,
   endDate: string,
+  testingDate: string | null,
 ): Promise<void> {
   const db = await getDb();
   await db
     .update(testingCycles)
-    .set({ startDate, endDate, updatedAt: sql`CURRENT_TIMESTAMP` })
+    .set({ startDate, endDate, testingDate, updatedAt: sql`CURRENT_TIMESTAMP` })
     .where(eq(testingCycles.id, id));
+}
+
+/** Minimum classes a student must attend in a cycle to be eligible to test. */
+export function minClassesToTest(rank: BeltRank): number {
+  if (rank.track === "tiger") return 6;
+  if (rank.classGroup === "jr-brb") return 12; // brown / red / black (+ seniors)
+  return 10; // white, yellow, green, blue, purple (+ seniors)
 }
 
 export async function registerToTest(cycleId: number, studentId: number): Promise<void> {
@@ -496,6 +504,8 @@ export interface TestingRow extends StudentRow {
   orangeStripe: boolean;
   redStripe: boolean;
   attendanceThisCycle: number;
+  minClasses: number;
+  meetsMinimum: boolean;
   testingFor: string | null;
 }
 
@@ -521,13 +531,15 @@ export async function getCycleRegistrations(cycleId: number): Promise<TestingRow
     .orderBy(asc(beltRanks.sortOrder), asc(students.lastName));
 
   const ids = rows.map((x) => x.s.id);
-  const attendance = await presentCountsInRange(ids, cycle.startDate, cycle.endDate);
+  const attendance = await presentCountsInRange(ids, cycle.startDate, cycle.testingDate ?? cycle.endDate);
   const ranks = await listBeltRanks();
   const rankById = new Map(ranks.map((r) => [r.id, r]));
 
   return rows.map((x) => {
     const rank = toRank(x);
     const next = rank.nextRankId ? rankById.get(rank.nextRankId) : null;
+    const attended = attendance.get(x.s.id) ?? 0;
+    const minClasses = minClassesToTest(rank);
     return {
       ...x.s,
       rank,
@@ -536,7 +548,9 @@ export async function getCycleRegistrations(cycleId: number): Promise<TestingRow
       blueStripe: Boolean(x.blue),
       orangeStripe: Boolean(x.orange),
       redStripe: Boolean(x.red),
-      attendanceThisCycle: attendance.get(x.s.id) ?? 0,
+      attendanceThisCycle: attended,
+      minClasses,
+      meetsMinimum: attended >= minClasses,
       testingFor: next ? next.name : null,
     };
   });
@@ -580,6 +594,8 @@ async function presentCountsInRange(
 
 export interface CandidateRow extends StudentRow {
   attendanceThisCycle: number;
+  minClasses: number;
+  meetsMinimum: boolean;
   registered: boolean;
 }
 
@@ -596,7 +612,7 @@ export async function getCycleCandidates(cycleId: number): Promise<CandidateRow[
     .orderBy(asc(students.lastName), asc(students.firstName));
 
   const ids = rows.map((x) => x.s.id);
-  const attendance = await presentCountsInRange(ids, cycle.startDate, cycle.endDate);
+  const attendance = await presentCountsInRange(ids, cycle.startDate, cycle.testingDate ?? cycle.endDate);
 
   const reg = await db
     .select({ studentId: testingRegistration.studentId })
@@ -604,13 +620,20 @@ export async function getCycleCandidates(cycleId: number): Promise<CandidateRow[
     .where(eq(testingRegistration.cycleId, cycleId));
   const registered = new Set(reg.map((r) => r.studentId));
 
-  return rows.map((x) => ({
-    ...x.s,
-    rank: toRank(x),
-    permissionToTest: Boolean(x.ptt),
-    attendanceThisCycle: attendance.get(x.s.id) ?? 0,
-    registered: registered.has(x.s.id),
-  }));
+  return rows.map((x) => {
+    const rank = toRank(x);
+    const attended = attendance.get(x.s.id) ?? 0;
+    const minClasses = minClassesToTest(rank);
+    return {
+      ...x.s,
+      rank,
+      permissionToTest: Boolean(x.ptt),
+      attendanceThisCycle: attended,
+      minClasses,
+      meetsMinimum: attended >= minClasses,
+      registered: registered.has(x.s.id),
+    };
+  });
 }
 
 /**
@@ -631,10 +654,10 @@ export async function promoteCycle(cycleId: number): Promise<PromotionResult[]> 
   return results;
 }
 
-/** CSV export of the testing list: name, age, current belt, testing-for. */
+/** CSV export of the testing list: name, age, belt, testing-for, size, classes. */
 export async function buildTestingCycleCsv(cycleId: number): Promise<string> {
   const roster = await getCycleRegistrations(cycleId);
-  const lines = [csvRow(["Name", "Age", "Current Belt", "Testing For"])];
+  const lines = [csvRow(["Name", "Age", "Current Belt", "Testing For", "Belt Size", "Classes", "Min", "Eligible"])];
   for (const s of roster) {
     const age = ageFromDob(s.dateOfBirth);
     lines.push(csvRow([
@@ -642,6 +665,10 @@ export async function buildTestingCycleCsv(cycleId: number): Promise<string> {
       age,
       s.rank.name,
       s.testingFor ?? "(top rank)",
+      s.beltSize ?? "",
+      s.attendanceThisCycle,
+      s.minClasses,
+      s.meetsMinimum ? "Yes" : "No",
     ]));
   }
   return lines.join("\r\n");

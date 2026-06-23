@@ -302,6 +302,7 @@ export const testingCycles = sqliteTable("testing_cycles", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   startDate: text("start_date").notNull(),
   endDate: text("end_date").notNull(),
+  testingDate: text("testing_date"),
   isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),

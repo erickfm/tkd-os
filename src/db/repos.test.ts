@@ -19,11 +19,12 @@ import {
   getStudentAttendance,
   listBeltRanks,
   listStudents,
+  minClassesToTest,
   promoteCycle,
   registerToTest,
   setAttendance,
   unregisterFromTest,
-  updateCycleDates,
+  updateCycle,
   updateProgress,
   type StudentInput,
 } from "./repos";
@@ -45,6 +46,7 @@ beforeAll(() => {
   sqlite.exec(readFileSync(join(migrationsDir, "0003_guardians.sql"), "utf8"));
   sqlite.exec(readFileSync(join(migrationsDir, "0004_testing_cycle.sql"), "utf8"));
   sqlite.exec(readFileSync(join(migrationsDir, "0005_legacy_id.sql"), "utf8"));
+  sqlite.exec(readFileSync(join(migrationsDir, "0006_testing_date.sql"), "utf8"));
 
   const blackId = (sqlite
     .prepare("SELECT id FROM belt_ranks WHERE track='regular' AND degree IS NOT NULL ORDER BY sort_order LIMIT 1")
@@ -142,7 +144,7 @@ describe("testing cycle", () => {
   it("counts only in-range attendance and exposes stripe/PTT flags", async () => {
     const rank = await lowestRegularColorRank();
     const cycle = await getCurrentCycle();
-    await updateCycleDates(cycle.id, "2024-01-01", "2024-12-31");
+    await updateCycle(cycle.id, "2024-01-01", "2024-12-31", null);
 
     const id = await createStudent(makeInput({ firstName: "Cy", lastName: "Cle", beltRankId: rank.id }));
     await updateProgress(id, { blueStripe: true, permissionToTest: true });
@@ -162,6 +164,31 @@ describe("testing cycle", () => {
     expect(reg.testingFor).not.toBeNull();
 
     await unregisterFromTest(cycle.id, id);
+  });
+
+  it("computes min classes by rank and flags eligibility from cycle attendance", async () => {
+    const ranks = await listBeltRanks();
+    const cub = ranks.find((r) => r.track === "tiger")!;
+    const white = ranks.find((r) => r.track === "regular" && r.classGroup === "jr-wy")!;
+    const brown = ranks.find((r) => r.track === "regular" && r.classGroup === "jr-brb" && r.degree == null)!;
+    expect(minClassesToTest(cub)).toBe(6);
+    expect(minClassesToTest(white)).toBe(10);
+    expect(minClassesToTest(brown)).toBe(12);
+
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-06-01", "2025-08-01", "2025-07-15");
+    const id = await createStudent(makeInput({ firstName: "Elig", lastName: "Ible", beltRankId: white.id }));
+    // 10 present classes inside the window -> meets the white-belt minimum of 10.
+    for (let i = 0; i < 10; i++) {
+      const s = await getOrCreateSession(`2025-06-${String(i + 2).padStart(2, "0")}`, "adult");
+      await setAttendance(s, id, "present");
+    }
+    await registerToTest(cycle.id, id);
+    const row = (await getCycleRegistrations(cycle.id)).find((r) => r.id === id)!;
+    expect(row.minClasses).toBe(10);
+    expect(row.attendanceThisCycle).toBe(10);
+    expect(row.meetsMinimum).toBe(true);
+    await promoteCycle(cycle.id);
   });
 
   it("promotes every registered student one rank and clears the list", async () => {
@@ -186,7 +213,7 @@ describe("testing cycle", () => {
 
     const csv = await buildTestingCycleCsv(cycle.id);
     const [header, ...rows] = csv.split("\r\n");
-    expect(header).toBe(["Name", "Age", "Current Belt", "Testing For"].join(","));
+    expect(header).toBe(["Name", "Age", "Current Belt", "Testing For", "Belt Size", "Classes", "Min", "Eligible"].join(","));
     expect(rows.some((line) => line.startsWith("Ex Port,"))).toBe(true);
     expect(rows.find((line) => line.startsWith("Ex Port,"))).toContain(rank.name);
 
@@ -196,7 +223,7 @@ describe("testing cycle", () => {
   it("lists all active students with cycle attendance and a registered flag", async () => {
     const rank = await lowestRegularColorRank();
     const cycle = await getCurrentCycle();
-    await updateCycleDates(cycle.id, "2025-01-01", "2025-12-31");
+    await updateCycle(cycle.id, "2025-01-01", "2025-12-31", null);
     const id = await createStudent(makeInput({ firstName: "Cand", lastName: "Idate", beltRankId: rank.id }));
 
     const inSession = await getOrCreateSession("2025-05-05", "adult");

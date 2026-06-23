@@ -331,6 +331,7 @@ The current belt-testing period. The app works against a single active cycle at 
 | `id` | INTEGER | NOT NULL | autoincrement | Primary key |
 | `start_date` | DATE | NOT NULL | — | First day of the testing cycle |
 | `end_date` | DATE | NOT NULL | — | Last day of the testing cycle |
+| `testing_date` | DATE | NULL | — | Day the testing happens; class counts use start→testing_date (or end if unset) |
 | `is_active` | BOOLEAN | NOT NULL | `TRUE` | Marks the current cycle |
 | `created_at` | TIMESTAMP | NOT NULL | now() | Record creation timestamp |
 | `updated_at` | TIMESTAMP | NOT NULL | now() | Last update timestamp |

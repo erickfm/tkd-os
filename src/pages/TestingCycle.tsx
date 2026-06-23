@@ -12,7 +12,7 @@ import {
   promoteCycle,
   registerToTest,
   unregisterFromTest,
-  updateCycleDates,
+  updateCycle,
   type CandidateRow,
   type PromotionResult,
   type TestingRow,
@@ -25,6 +25,7 @@ export function TestingCyclePage() {
   const [cycle, setCycle] = useState<TestingCycle | null>(null);
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
+  const [testingDate, setTestingDate] = useState("");
   const [roster, setRoster] = useState<TestingRow[]>([]);
   const [candidates, setCandidates] = useState<CandidateRow[]>([]);
   const [filter, setFilter] = useState("");
@@ -46,6 +47,7 @@ export function TestingCyclePage() {
         setCycle(c);
         setStart(c.startDate);
         setEnd(c.endDate);
+        setTestingDate(c.testingDate ?? "");
         await loadLists(c.id);
       } catch (e) {
         setError(String(e));
@@ -57,8 +59,9 @@ export function TestingCyclePage() {
     if (!cycle) return;
     if (end < start) { setError("End date can't be before start date."); return; }
     setError(null);
-    await updateCycleDates(cycle.id, start, end);
-    setCycle({ ...cycle, startDate: start, endDate: end });
+    const td = testingDate || null;
+    await updateCycle(cycle.id, start, end, td);
+    setCycle({ ...cycle, startDate: start, endDate: end, testingDate: td });
     await loadLists(cycle.id); // attendance counts depend on the date range
   }
 
@@ -124,7 +127,11 @@ export function TestingCyclePage() {
           <span className="mb-1 block text-sm font-medium">Cycle end</span>
           <TextInput type="date" value={end} onChange={(e) => setEnd(e.target.value)} onBlur={saveDates} className="w-44" />
         </label>
-        <p className="mb-2 text-xs text-[var(--color-fg-muted)]">Attendance counts classes attended between these dates.</p>
+        <label className="block">
+          <span className="mb-1 block text-sm font-medium">Testing date</span>
+          <TextInput type="date" value={testingDate} onChange={(e) => setTestingDate(e.target.value)} onBlur={saveDates} className="w-44" />
+        </label>
+        <p className="mb-2 text-xs text-[var(--color-fg-muted)]">Attendance counts classes between the start and the testing date (or end).</p>
       </div>
 
       {results && (
@@ -154,8 +161,9 @@ export function TestingCyclePage() {
                 <th className="px-3 py-2 font-medium">Student</th>
                 <th className="px-3 py-2 font-medium">Age</th>
                 <th className="px-3 py-2 font-medium">Belt</th>
+                <th className="px-3 py-2 font-medium">Size</th>
                 <th className="px-3 py-2 font-medium">Testing for</th>
-                <th className="px-3 py-2 font-medium text-right">Attendance</th>
+                <th className="px-3 py-2 font-medium text-right">Classes</th>
                 <th className="px-3 py-2 font-medium">Progress</th>
                 <th className="px-3 py-2"></th>
               </tr>
@@ -168,8 +176,9 @@ export function TestingCyclePage() {
                     <td className="px-3 py-2">{s.firstName} {s.lastName}</td>
                     <td className="px-3 py-2">{age ?? "—"}</td>
                     <td className="px-3 py-2"><BeltBadge rank={s.rank} size="sm" /></td>
+                    <td className="px-3 py-2">{s.beltSize ?? "—"}</td>
                     <td className="px-3 py-2 text-[var(--color-fg-muted)]">{s.testingFor ?? "(top rank)"}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{s.attendanceThisCycle}</td>
+                    <td className="px-3 py-2 text-right tabular-nums"><ClassesCell att={s.attendanceThisCycle} min={s.minClasses} met={s.meetsMinimum} /></td>
                     <td className="px-3 py-2">
                       <div className="flex flex-wrap gap-1">
                         {s.greenStripe && <Tag color="#16a34a">Green</Tag>}
@@ -202,7 +211,8 @@ export function TestingCyclePage() {
               <th className="px-3 py-2 font-medium">Student</th>
               <th className="px-3 py-2 font-medium">Age</th>
               <th className="px-3 py-2 font-medium">Belt</th>
-              <th className="px-3 py-2 font-medium text-right">Attendance</th>
+              <th className="px-3 py-2 font-medium">Size</th>
+              <th className="px-3 py-2 font-medium text-right">Classes</th>
               <th className="px-3 py-2 text-right"></th>
             </tr>
           </thead>
@@ -214,7 +224,8 @@ export function TestingCyclePage() {
                   <td className="px-3 py-2">{s.firstName} {s.lastName}</td>
                   <td className="px-3 py-2">{age ?? "—"}</td>
                   <td className="px-3 py-2"><BeltBadge rank={s.rank} size="sm" /></td>
-                  <td className="px-3 py-2 text-right tabular-nums">{s.attendanceThisCycle}</td>
+                  <td className="px-3 py-2">{s.beltSize ?? "—"}</td>
+                  <td className="px-3 py-2 text-right tabular-nums"><ClassesCell att={s.attendanceThisCycle} min={s.minClasses} met={s.meetsMinimum} /></td>
                   <td className="px-3 py-2 text-right">
                     {s.registered ? (
                       <span className="text-xs text-[var(--color-fg-muted)]">Registered ✓</span>
@@ -226,12 +237,20 @@ export function TestingCyclePage() {
               );
             })}
             {visibleCandidates.length === 0 && (
-              <tr><td colSpan={5} className="p-6 text-center text-sm text-[var(--color-fg-muted)]">No students match.</td></tr>
+              <tr><td colSpan={6} className="p-6 text-center text-sm text-[var(--color-fg-muted)]">No students match.</td></tr>
             )}
           </tbody>
         </table>
       </div>
     </>
+  );
+}
+
+function ClassesCell({ att, min, met }: { att: number; min: number; met: boolean }) {
+  return (
+    <span className={met ? "font-medium text-green-700" : "text-amber-600"} title={met ? "Meets the minimum to test" : `Needs ${min} classes to test`}>
+      {att} / {min}
+    </span>
   );
 }
 
