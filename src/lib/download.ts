@@ -10,7 +10,7 @@ export async function saveTextFile(defaultName: string, text: string): Promise<b
   const { invoke } = await import("@tauri-apps/api/core");
   const path = await save({
     defaultPath: defaultName,
-    filters: [{ name: "Tab-separated values", extensions: ["tsv"] }],
+    filters: [{ name: "Comma-separated values", extensions: ["csv"] }],
   });
   if (!path) return false;
   await invoke("write_text_file", { path, contents: text });

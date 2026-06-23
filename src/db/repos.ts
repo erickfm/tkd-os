@@ -411,23 +411,32 @@ export async function removeFromRoster(eventId: number, studentId: number): Prom
     .where(and(eq(eventRoster.eventId, eventId), eq(eventRoster.studentId, studentId)));
 }
 
-/** Tab-separated export of an event roster: name, age, track, belt, phone, email. */
-export async function buildEventRosterTsv(eventId: number): Promise<string> {
+/** One CSV row (RFC 4180): quote fields containing comma, quote, or newline. */
+function csvRow(fields: (string | number | null)[]): string {
+  return fields
+    .map((f) => {
+      const s = f == null ? "" : String(f);
+      return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    })
+    .join(",");
+}
+
+/** CSV export of an event roster: name, age, track, belt, phone, email. */
+export async function buildEventRosterCsv(eventId: number): Promise<string> {
   const roster = await getEventRoster(eventId);
-  const header = ["Name", "Age", "Track", "Belt", "Phone", "Email"];
-  const lines = [header.join("\t")];
+  const lines = [csvRow(["Name", "Age", "Track", "Belt", "Phone", "Email"])];
   for (const s of roster) {
     const age = ageFromDob(s.dateOfBirth);
-    lines.push([
+    lines.push(csvRow([
       `${s.firstName} ${s.lastName}`,
-      age == null ? "" : String(age),
+      age,
       s.track === "tiger" ? "Tiger Cubs" : "Jr./Adult",
       s.rank.name,
       s.phone ?? "",
       s.email ?? "",
-    ].join("\t"));
+    ]));
   }
-  return lines.join("\n");
+  return lines.join("\r\n");
 }
 
 // ----------------------------------------------------------------------------
@@ -622,21 +631,20 @@ export async function promoteCycle(cycleId: number): Promise<PromotionResult[]> 
   return results;
 }
 
-/** Tab-separated export of the testing list: name, age, current belt, testing-for. */
-export async function buildTestingCycleTsv(cycleId: number): Promise<string> {
+/** CSV export of the testing list: name, age, current belt, testing-for. */
+export async function buildTestingCycleCsv(cycleId: number): Promise<string> {
   const roster = await getCycleRegistrations(cycleId);
-  const header = ["Name", "Age", "Current Belt", "Testing For"];
-  const lines = [header.join("\t")];
+  const lines = [csvRow(["Name", "Age", "Current Belt", "Testing For"])];
   for (const s of roster) {
     const age = ageFromDob(s.dateOfBirth);
-    lines.push([
+    lines.push(csvRow([
       `${s.firstName} ${s.lastName}`,
-      age == null ? "" : String(age),
+      age,
       s.rank.name,
       s.testingFor ?? "(top rank)",
-    ].join("\t"));
+    ]));
   }
-  return lines.join("\n");
+  return lines.join("\r\n");
 }
 
 // ----------------------------------------------------------------------------

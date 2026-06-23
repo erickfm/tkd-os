@@ -9,7 +9,7 @@ import { StudentSearchAdd } from "@/components/StudentSearchAdd";
 import { EventForm } from "./EventForm";
 import {
   addToRoster,
-  buildEventRosterTsv,
+  buildEventRosterCsv,
   getEventRoster,
   listEvents,
   listStudents,
@@ -106,9 +106,9 @@ function EventDetail({ event, onClose, onEdit }: { event: EventRow; onClose: () 
     await load();
   }
   async function exportTsv() {
-    const tsv = await buildEventRosterTsv(event.id);
+    const csv = await buildEventRosterCsv(event.id);
     const safe = event.name.replace(/[^a-z0-9]+/gi, "_");
-    const saved = await saveTextFile(`${safe}_roster.tsv`, tsv);
+    const saved = await saveTextFile(`${safe}_roster.csv`, csv);
     setExportMsg(saved ? "Roster saved." : "Export canceled.");
   }
 

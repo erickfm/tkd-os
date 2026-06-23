@@ -13,10 +13,30 @@ import {
   type StudentRow,
 } from "@/db/repos";
 import type { BeltRank } from "@/db/schema";
+import { BELT_SIZES } from "@/db/enums";
 import { AGE_GROUP_LABEL, prettyDate, TRACK_LABEL } from "@/lib/format";
 
 type TrackFilter = "all" | "regular" | "tiger";
 type Special = "all" | "black" | "ptt";
+type SortKey = "name" | "belt" | "track" | "ageGroup" | "beltSize" | "joined";
+type SortDir = "asc" | "desc";
+
+const ageGroupSort = (r: StudentRow) => (r.track === "tiger" ? "" : AGE_GROUP_LABEL[r.ageGroup]);
+const beltSizeSort = (r: StudentRow) => {
+  if (r.beltSize == null) return BELT_SIZES.length + 1;
+  const i = BELT_SIZES.indexOf(r.beltSize as (typeof BELT_SIZES)[number]);
+  return i === -1 ? BELT_SIZES.length : i;
+};
+
+// Ascending comparator per column; direction is applied by the caller.
+const COMPARATORS: Record<SortKey, (a: StudentRow, b: StudentRow) => number> = {
+  name: (a, b) => a.lastName.localeCompare(b.lastName) || a.firstName.localeCompare(b.firstName),
+  belt: (a, b) => a.rank.track.localeCompare(b.rank.track) || a.rank.sortOrder - b.rank.sortOrder,
+  track: (a, b) => TRACK_LABEL[a.track].localeCompare(TRACK_LABEL[b.track]),
+  ageGroup: (a, b) => ageGroupSort(a).localeCompare(ageGroupSort(b)),
+  beltSize: (a, b) => beltSizeSort(a) - beltSizeSort(b),
+  joined: (a, b) => a.joinDate.localeCompare(b.joinDate),
+};
 
 const SPECIAL_LABEL: Record<Exclude<Special, "all">, string> = {
   black: "Black belts",
@@ -29,7 +49,8 @@ export function StudentsPage() {
   const [ranks, setRanks] = useState<BeltRank[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [sort, setSort] = useState<"name" | "rank">("name");
+  const [sortKey, setSortKey] = useState<SortKey>("name");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [track, setTrack] = useState<TrackFilter>("all");
   const [special, setSpecial] = useState<Special>("all");
   const [showInactive, setShowInactive] = useState(false);
@@ -66,18 +87,20 @@ export function StudentsPage() {
           : special === "black" ? r.rank.degree != null
           : r.permissionToTest)
       .filter((r) => q === "" ? true : `${r.firstName} ${r.lastName}`.toLowerCase().includes(q));
+    const dir = sortDir === "asc" ? 1 : -1;
     out.sort((a, b) => {
-      if (sort === "rank") {
-        if (a.rank.track !== b.rank.track) return a.rank.track.localeCompare(b.rank.track);
-        if (a.rank.sortOrder !== b.rank.sortOrder) return a.rank.sortOrder - b.rank.sortOrder;
-      }
-      return (
-        a.lastName.localeCompare(b.lastName) ||
-        a.firstName.localeCompare(b.firstName)
-      );
+      const v = COMPARATORS[sortKey](a, b);
+      if (v !== 0) return dir * v;
+      // Stable tie-break by name, always ascending.
+      return a.lastName.localeCompare(b.lastName) || a.firstName.localeCompare(b.firstName);
     });
     return out;
-  }, [rows, search, sort, track, special, showInactive]);
+  }, [rows, search, sortKey, sortDir, track, special, showInactive]);
+
+  function toggleSort(key: SortKey) {
+    if (key === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortKey(key); setSortDir("asc"); }
+  }
 
   function openNew() { setEditing(null); setDrawerOpen(true); }
   function openEdit(r: StudentRow) { setEditing(r); setDrawerOpen(true); }
@@ -126,10 +149,6 @@ export function StudentsPage() {
               { value: "regular", label: "Jr./Adult" },
               { value: "tiger", label: "Tiger Cubs" },
             ]} />
-            <Segmented value={sort} onChange={setSort} options={[
-              { value: "name", label: "By name" },
-              { value: "rank", label: "By rank" },
-            ]} />
             {special !== "all" && (
               <button onClick={clearSpecial}
                 className="inline-flex items-center gap-1 rounded-full border border-[var(--color-brand)] bg-[var(--color-brand)]/10 px-3 py-1 text-sm text-[var(--color-brand)]">
@@ -150,7 +169,14 @@ export function StudentsPage() {
             <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
               <table className="w-full text-sm">
                 <thead className="bg-[var(--color-surface-2)] text-left text-xs uppercase tracking-wide text-[var(--color-fg-muted)]">
-                  <tr><Th>Name</Th><Th>Belt</Th><Th>Track</Th><Th>Age Group</Th><Th>Belt Size</Th><Th>Joined</Th></tr>
+                  <tr>
+                    <SortTh label="Name" col="name" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
+                    <SortTh label="Belt" col="belt" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
+                    <SortTh label="Track" col="track" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
+                    <SortTh label="Age Group" col="ageGroup" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
+                    <SortTh label="Belt Size" col="beltSize" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
+                    <SortTh label="Joined" col="joined" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
+                  </tr>
                 </thead>
                 <tbody>
                   {filtered.map((r) => (
@@ -187,8 +213,23 @@ export function StudentsPage() {
   );
 }
 
-function Th({ children }: { children: React.ReactNode }) {
-  return <th className="px-4 py-2.5 font-medium">{children}</th>;
+function SortTh({ label, col, sortKey, sortDir, onSort }: {
+  label: string; col: SortKey; sortKey: SortKey; sortDir: SortDir; onSort: (k: SortKey) => void;
+}) {
+  const active = sortKey === col;
+  return (
+    <th className="px-4 py-2.5 font-medium">
+      <button
+        type="button"
+        onClick={() => onSort(col)}
+        className={`inline-flex items-center gap-1 uppercase tracking-wide ${active ? "text-[var(--color-fg)]" : "hover:text-[var(--color-fg)]"}`}
+        aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : "none"}
+      >
+        {label}
+        {active && <span className="text-[9px] leading-none">{sortDir === "asc" ? "▲" : "▼"}</span>}
+      </button>
+    </th>
+  );
 }
 function Td({ children }: { children: React.ReactNode }) {
   return <td className="px-4 py-2.5">{children}</td>;

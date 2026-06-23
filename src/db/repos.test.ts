@@ -7,8 +7,8 @@ import { fileURLToPath } from "node:url";
 import { __setTestDb, createDb } from "./client";
 import {
   addToRoster,
-  buildEventRosterTsv,
-  buildTestingCycleTsv,
+  buildEventRosterCsv,
+  buildTestingCycleCsv,
   createEvent,
   createStudent,
   getCurrentCycle,
@@ -43,6 +43,7 @@ beforeAll(() => {
   sqlite.exec(readFileSync(join(migrationsDir, "0002_belt_colors.sql"), "utf8"));
   sqlite.exec(readFileSync(join(migrationsDir, "0003_guardians.sql"), "utf8"));
   sqlite.exec(readFileSync(join(migrationsDir, "0004_testing_cycle.sql"), "utf8"));
+  sqlite.exec(readFileSync(join(migrationsDir, "0005_legacy_id.sql"), "utf8"));
 
   const blackId = (sqlite
     .prepare("SELECT id FROM belt_ranks WHERE track='regular' AND degree IS NOT NULL ORDER BY sort_order LIMIT 1")
@@ -176,17 +177,17 @@ describe("testing cycle", () => {
     expect(await getCycleRegistrations(cycle.id)).toHaveLength(0);
   });
 
-  it("exports name, age, and current belt as TSV", async () => {
+  it("exports name, age, and current belt as CSV", async () => {
     const rank = await lowestRegularColorRank();
     const cycle = await getCurrentCycle();
     const id = await createStudent(makeInput({ firstName: "Ex", lastName: "Port", beltRankId: rank.id }));
     await registerToTest(cycle.id, id);
 
-    const tsv = await buildTestingCycleTsv(cycle.id);
-    const [header, ...rows] = tsv.split("\n");
-    expect(header).toBe(["Name", "Age", "Current Belt", "Testing For"].join("\t"));
-    expect(rows.some((line) => line.startsWith("Ex Port\t"))).toBe(true);
-    expect(rows.find((line) => line.startsWith("Ex Port\t"))).toContain(rank.name);
+    const csv = await buildTestingCycleCsv(cycle.id);
+    const [header, ...rows] = csv.split("\r\n");
+    expect(header).toBe(["Name", "Age", "Current Belt", "Testing For"].join(","));
+    expect(rows.some((line) => line.startsWith("Ex Port,"))).toBe(true);
+    expect(rows.find((line) => line.startsWith("Ex Port,"))).toContain(rank.name);
 
     await promoteCycle(cycle.id); // clears registrations for any later runs
   });
@@ -215,7 +216,7 @@ describe("testing cycle", () => {
 });
 
 describe("event roster export", () => {
-  it("exports name, age, track, and belt as TSV", async () => {
+  it("exports name, age, track, and belt as CSV", async () => {
     const rank = await lowestRegularColorRank();
     const id = await createStudent(makeInput({ firstName: "Seminar", lastName: "Goer", beltRankId: rank.id }));
     const eventId = await createEvent({
@@ -224,10 +225,10 @@ describe("event roster export", () => {
     });
     await addToRoster(eventId, id);
 
-    const tsv = await buildEventRosterTsv(eventId);
-    const [header, ...rows] = tsv.split("\n");
-    expect(header).toBe(["Name", "Age", "Track", "Belt", "Phone", "Email"].join("\t"));
-    const line = rows.find((l) => l.startsWith("Seminar Goer\t"))!;
+    const csv = await buildEventRosterCsv(eventId);
+    const [header, ...rows] = csv.split("\r\n");
+    expect(header).toBe(["Name", "Age", "Track", "Belt", "Phone", "Email"].join(","));
+    const line = rows.find((l) => l.startsWith("Seminar Goer,"))!;
     expect(line).toContain(rank.name);
     expect(line).toContain("Jr./Adult");
   });

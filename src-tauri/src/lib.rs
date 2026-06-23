@@ -33,6 +33,12 @@ pub fn run() {
             sql: include_str!("../migrations/0004_testing_cycle.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 5,
+            description: "legacy_id",
+            sql: include_str!("../migrations/0005_legacy_id.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()

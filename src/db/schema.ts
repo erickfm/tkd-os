@@ -87,11 +87,13 @@ export const students = sqliteTable(
       .default(false),
     notes: text("notes"),
     isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+    legacyId: integer("legacy_id"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (t) => ({
     nameIdx: index("students_name_idx").on(t.lastName, t.firstName),
+    legacyIdIdx: index("students_legacy_id_idx").on(t.legacyId),
     trackIdx: index("students_track_idx").on(t.track),
     ageGroupIdx: index("students_age_group_idx").on(t.ageGroup),
     beltRankIdx: index("students_belt_rank_idx").on(t.beltRankId),

@@ -51,7 +51,8 @@ Core student profile. One row per student.
 | `join_date` | DATE | NOT NULL | today | Date student joined the dojang |
 | `is_starter_student` | BOOLEAN | NOT NULL | `FALSE` | Whether student is on or has been through a starter course |
 | `notes` | TEXT | NULL | — | Free-form notes (medical info, goals, parent name, etc.) |
-| `is_active` | BOOLEAN | NOT NULL | `TRUE` | Soft-delete flag |
+| `is_active` | BOOLEAN | NOT NULL | `TRUE` | Soft-delete flag. For legacy imports, set from the MSS `Activity Level` (1 = active) — not the termination date |
+| `legacy_id` | INTEGER | NULL | — | Source MSS `Student ID` for imported students (lets legacy data re-sync exactly); NULL for app-created students |
 | `created_at` | TIMESTAMP | NOT NULL | now() | Record creation timestamp |
 | `updated_at` | TIMESTAMP | NOT NULL | now() | Last update timestamp |
 

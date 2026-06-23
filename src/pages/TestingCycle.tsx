@@ -5,7 +5,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { BeltBadge } from "@/components/BeltBadge";
 import { Button, EmptyState, TextInput } from "@/components/ui";
 import {
-  buildTestingCycleTsv,
+  buildTestingCycleCsv,
   getCurrentCycle,
   getCycleCandidates,
   getCycleRegistrations,
@@ -88,8 +88,8 @@ export function TestingCyclePage() {
 
   async function exportTsv() {
     if (!cycle) return;
-    const tsv = await buildTestingCycleTsv(cycle.id);
-    const saved = await saveTextFile(`testing_cycle_${cycle.startDate}_to_${cycle.endDate}.tsv`, tsv);
+    const csv = await buildTestingCycleCsv(cycle.id);
+    const saved = await saveTextFile(`testing_cycle_${cycle.startDate}_to_${cycle.endDate}.csv`, csv);
     setExportMsg(saved ? "Testing list saved." : "Export canceled.");
   }
 
