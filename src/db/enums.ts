@@ -11,7 +11,6 @@ export const CLASS_GROUPS = ["jr-wy", "jr-gbp", "jr-brb"] as const;
 export type ClassGroup = (typeof CLASS_GROUPS)[number];
 
 export const EVENT_TYPES = [
-  "Belt Testing",
   "Seminar",
   "Tournament",
   "Demo",

@@ -68,6 +68,12 @@ export const students = sqliteTable(
     dateOfBirth: text("date_of_birth"),
     phone: text("phone", { length: 30 }),
     email: text("email", { length: 255 }),
+    guardian1Name: text("guardian1_name"),
+    guardian1Phone: text("guardian1_phone"),
+    guardian1Email: text("guardian1_email"),
+    guardian2Name: text("guardian2_name"),
+    guardian2Phone: text("guardian2_phone"),
+    guardian2Email: text("guardian2_email"),
     emergencyContact: text("emergency_contact", { length: 255 }),
     track: text("track").notNull().default("regular"),
     ageGroup: text("age_group").notNull().default("jr"),
@@ -81,11 +87,13 @@ export const students = sqliteTable(
       .default(false),
     notes: text("notes"),
     isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+    legacyId: integer("legacy_id"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (t) => ({
     nameIdx: index("students_name_idx").on(t.lastName, t.firstName),
+    legacyIdIdx: index("students_legacy_id_idx").on(t.legacyId),
     trackIdx: index("students_track_idx").on(t.track),
     ageGroupIdx: index("students_age_group_idx").on(t.ageGroup),
     beltRankIdx: index("students_belt_rank_idx").on(t.beltRankId),
@@ -290,6 +298,36 @@ export const starterCourseEnrollment = sqliteTable(
   })
 );
 
+export const testingCycles = sqliteTable("testing_cycles", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  startDate: text("start_date").notNull(),
+  endDate: text("end_date").notNull(),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const testingRegistration = sqliteTable(
+  "testing_registration",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    cycleId: integer("cycle_id")
+      .notNull()
+      .references(() => testingCycles.id),
+    studentId: integer("student_id")
+      .notNull()
+      .references(() => students.id),
+    registeredAt: text("registered_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (t) => ({
+    cycleStudentUnique: uniqueIndex("testing_registration_cycle_student_uniq").on(
+      t.cycleId,
+      t.studentId,
+    ),
+    studentIdx: index("testing_registration_student_idx").on(t.studentId),
+  }),
+);
+
 export type BeltRank = typeof beltRanks.$inferSelect;
 export type Student = typeof students.$inferSelect;
 export type RankHistoryEntry = typeof rankHistory.$inferSelect;
@@ -300,3 +338,5 @@ export type EventRow = typeof events.$inferSelect;
 export type EventRosterEntry = typeof eventRoster.$inferSelect;
 export type StarterCourse = typeof starterCourses.$inferSelect;
 export type StarterCourseEnrollment = typeof starterCourseEnrollment.$inferSelect;
+export type TestingCycle = typeof testingCycles.$inferSelect;
+export type TestingRegistration = typeof testingRegistration.$inferSelect;

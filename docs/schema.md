@@ -16,10 +16,12 @@ Complete reference for all tables, fields, types, constraints, and relationships
 8. [event\_roster](#8-event_roster)
 9. [starter\_courses](#9-starter_courses)
 10. [starter\_course\_enrollment](#10-starter_course_enrollment)
-11. [Enumerations & Lookup Values](#11-enumerations--lookup-values)
-12. [Relationships Diagram](#12-relationships-diagram)
-13. [Business Rules & Constraints](#13-business-rules--constraints)
-14. [Indexes](#14-indexes)
+11. [testing\_cycles](#11-testing_cycles)
+12. [testing\_registration](#12-testing_registration)
+13. [Enumerations & Lookup Values](#13-enumerations--lookup-values)
+14. [Relationships Diagram](#14-relationships-diagram)
+15. [Business Rules & Constraints](#15-business-rules--constraints)
+16. [Indexes](#16-indexes)
 
 ---
 
@@ -35,6 +37,12 @@ Core student profile. One row per student.
 | `date_of_birth` | DATE | NULL | — | Used for reference; age group is manually set |
 | `phone` | VARCHAR(30) | NULL | — | Student or guardian primary phone |
 | `email` | VARCHAR(255) | NULL | — | Student or guardian email |
+| `guardian1_name` | TEXT | NULL | — | Guardian 1 name |
+| `guardian1_phone` | TEXT | NULL | — | Guardian 1 phone |
+| `guardian1_email` | TEXT | NULL | — | Guardian 1 email |
+| `guardian2_name` | TEXT | NULL | — | Guardian 2 name |
+| `guardian2_phone` | TEXT | NULL | — | Guardian 2 phone |
+| `guardian2_email` | TEXT | NULL | — | Guardian 2 email |
 | `emergency_contact` | VARCHAR(255) | NULL | — | Name and phone of emergency contact |
 | `track` | ENUM | NOT NULL | `'regular'` | See [Track](#track) — `'tiger'` or `'regular'` |
 | `age_group` | ENUM | NOT NULL | `'jr'` | See [Age Group](#age-group) — `'jr'` or `'adult'`; ignored when track = `'tiger'` |
@@ -43,7 +51,8 @@ Core student profile. One row per student.
 | `join_date` | DATE | NOT NULL | today | Date student joined the dojang |
 | `is_starter_student` | BOOLEAN | NOT NULL | `FALSE` | Whether student is on or has been through a starter course |
 | `notes` | TEXT | NULL | — | Free-form notes (medical info, goals, parent name, etc.) |
-| `is_active` | BOOLEAN | NOT NULL | `TRUE` | Soft-delete flag |
+| `is_active` | BOOLEAN | NOT NULL | `TRUE` | Soft-delete flag. For legacy imports, set from the MSS `Activity Level` (1 = active) — not the termination date |
+| `legacy_id` | INTEGER | NULL | — | Source MSS `Student ID` for imported students (lets legacy data re-sync exactly); NULL for app-created students |
 | `created_at` | TIMESTAMP | NOT NULL | now() | Record creation timestamp |
 | `updated_at` | TIMESTAMP | NOT NULL | now() | Last update timestamp |
 
@@ -313,7 +322,49 @@ Junction table linking students to starter courses.
 
 ---
 
-## 11. Enumerations & Lookup Values
+## 11. `testing_cycles`
+
+The current belt-testing period. The app works against a single active cycle at a time; `getCurrentCycle()` returns the most recent `is_active = 1` row (one is seeded by migration 0004).
+
+| Column | Type | Nullable | Default | Description |
+|---|---|---|---|---|
+| `id` | INTEGER | NOT NULL | autoincrement | Primary key |
+| `start_date` | DATE | NOT NULL | — | First day of the testing cycle |
+| `end_date` | DATE | NOT NULL | — | Last day of the testing cycle |
+| `is_active` | BOOLEAN | NOT NULL | `TRUE` | Marks the current cycle |
+| `created_at` | TIMESTAMP | NOT NULL | now() | Record creation timestamp |
+| `updated_at` | TIMESTAMP | NOT NULL | now() | Last update timestamp |
+
+**Primary Key:** `id`
+
+**Check Constraint:** `end_date >= start_date`
+
+---
+
+## 12. `testing_registration`
+
+Students registered to test in a given cycle (the "registered to test" list).
+
+| Column | Type | Nullable | Default | Description |
+|---|---|---|---|---|
+| `id` | INTEGER | NOT NULL | autoincrement | Primary key |
+| `cycle_id` | INTEGER | NOT NULL | — | FK → `testing_cycles.id` |
+| `student_id` | INTEGER | NOT NULL | — | FK → `students.id` |
+| `registered_at` | TIMESTAMP | NOT NULL | now() | When the student was registered |
+
+**Primary Key:** `id`
+
+**Unique Constraint:** `(cycle_id, student_id)` — a student registers once per cycle
+
+**Foreign Keys:**
+- `cycle_id` → `testing_cycles.id`
+- `student_id` → `students.id`
+
+> **Promote all:** promoting a cycle calls the single-student promotion flow for each registered student (lowest belt first), then clears the cycle's registrations so no one is promoted twice. Attendance shown per student is the count of `present` records between the cycle's `start_date` and `end_date`. The TSV export columns are **Name, Age, Current Belt, Testing For** (ordered by belt `sort_order`).
+
+---
+
+## 13. Enumerations & Lookup Values
 
 ### Track
 
@@ -355,9 +406,10 @@ Used in `belt_ranks.class_group` to assign each regular-track belt to its attend
 
 ### Event Types
 
+Belt testing is no longer an event type — it now lives in the **testing cycle** feature (see tables 11 & 12). The DB `CHECK` from migration 0001 still permits the legacy `'Belt Testing'` string, but it is no longer offered in the UI.
+
 | Value |
 |---|
-| `Belt Testing` |
 | `Seminar` |
 | `Tournament` |
 | `Demo` |
@@ -380,7 +432,7 @@ Ordered smallest to largest. Stored as VARCHAR to preserve leading zeros.
 
 ---
 
-## 12. Relationships Diagram
+## 14. Relationships Diagram
 
 ```
 students ─────────────────────── belt_ranks
@@ -406,7 +458,7 @@ students ─────────────────────── b
 
 ---
 
-## 13. Business Rules & Constraints
+## 15. Business Rules & Constraints
 
 ### Track & Age Group
 
@@ -520,7 +572,7 @@ Column order for the tab-separated export, ordered by `belt_ranks.sort_order ASC
 
 ---
 
-## 14. Indexes
+## 16. Indexes
 
 | Table | Columns | Type | Purpose |
 |---|---|---|---|

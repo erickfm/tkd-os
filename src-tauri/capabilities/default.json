@@ -12,6 +12,7 @@
     "core:window:allow-start-dragging",
     "core:window:allow-is-maximized",
     "opener:default",
+    "dialog:allow-save",
     "sql:default",
     {
       "identifier": "sql:allow-execute",

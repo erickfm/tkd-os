@@ -15,7 +15,7 @@ interface Props {
 }
 
 function blank(): EventInput {
-  return { name: "", eventDate: today(), eventTime: null, eventType: "Belt Testing", location: null, notes: null };
+  return { name: "", eventDate: today(), eventTime: null, eventType: "Seminar", location: null, notes: null };
 }
 
 export function EventForm({ open, onClose, onSaved, editing }: Props) {
@@ -61,7 +61,7 @@ export function EventForm({ open, onClose, onSaved, editing }: Props) {
         </div>
       }>
       {error && <div className="mb-3 rounded-md border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-700">{error}</div>}
-      <Field label="Name"><TextInput value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. Spring Belt Testing 2026" /></Field>
+      <Field label="Name"><TextInput value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. Summer Tournament 2026" /></Field>
       <div className="grid grid-cols-2 gap-x-3">
         <Field label="Date"><TextInput type="date" value={form.eventDate} onChange={(e) => set("eventDate", e.target.value)} /></Field>
         <Field label="Time"><TextInput type="time" value={form.eventTime ?? ""} onChange={(e) => set("eventTime", e.target.value || null)} /></Field>
