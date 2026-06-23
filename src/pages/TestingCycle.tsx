@@ -1,25 +1,24 @@
-import { useEffect, useState } from "react";
-import { Award, Download, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Award, Download, Trash2, UserPlus } from "lucide-react";
 
 import { PageHeader } from "@/components/PageHeader";
 import { BeltBadge } from "@/components/BeltBadge";
 import { Button, EmptyState, TextInput } from "@/components/ui";
-import { StudentSearchAdd } from "@/components/StudentSearchAdd";
 import {
   buildTestingCycleTsv,
   getCurrentCycle,
+  getCycleCandidates,
   getCycleRegistrations,
-  listStudents,
   promoteCycle,
   registerToTest,
   unregisterFromTest,
   updateCycleDates,
+  type CandidateRow,
   type PromotionResult,
-  type StudentRow,
   type TestingRow,
 } from "@/db/repos";
 import type { TestingCycle } from "@/db/schema";
-import { downloadText } from "@/lib/download";
+import { saveTextFile } from "@/lib/download";
 import { ageFromDob, prettyDate } from "@/lib/format";
 
 export function TestingCyclePage() {
@@ -27,15 +26,17 @@ export function TestingCyclePage() {
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [roster, setRoster] = useState<TestingRow[]>([]);
-  const [allStudents, setAllStudents] = useState<StudentRow[]>([]);
+  const [candidates, setCandidates] = useState<CandidateRow[]>([]);
+  const [filter, setFilter] = useState("");
   const [results, setResults] = useState<PromotionResult[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
 
-  async function loadRoster(cycleId: number) {
-    const [r, all] = await Promise.all([getCycleRegistrations(cycleId), listStudents()]);
+  async function loadLists(cycleId: number) {
+    const [r, c] = await Promise.all([getCycleRegistrations(cycleId), getCycleCandidates(cycleId)]);
     setRoster(r);
-    setAllStudents(all);
+    setCandidates(c);
   }
 
   useEffect(() => {
@@ -45,7 +46,7 @@ export function TestingCyclePage() {
         setCycle(c);
         setStart(c.startDate);
         setEnd(c.endDate);
-        await loadRoster(c.id);
+        await loadLists(c.id);
       } catch (e) {
         setError(String(e));
       }
@@ -58,18 +59,18 @@ export function TestingCyclePage() {
     setError(null);
     await updateCycleDates(cycle.id, start, end);
     setCycle({ ...cycle, startDate: start, endDate: end });
-    await loadRoster(cycle.id); // attendance counts depend on the date range
+    await loadLists(cycle.id); // attendance counts depend on the date range
   }
 
   async function register(studentId: number) {
     if (!cycle) return;
     await registerToTest(cycle.id, studentId);
-    await loadRoster(cycle.id);
+    await loadLists(cycle.id);
   }
   async function unregister(studentId: number) {
     if (!cycle) return;
     await unregisterFromTest(cycle.id, studentId);
-    await loadRoster(cycle.id);
+    await loadLists(cycle.id);
   }
 
   async function promote() {
@@ -79,7 +80,7 @@ export function TestingCyclePage() {
     try {
       const res = await promoteCycle(cycle.id);
       setResults(res);
-      await loadRoster(cycle.id);
+      await loadLists(cycle.id);
     } finally {
       setBusy(false);
     }
@@ -88,11 +89,15 @@ export function TestingCyclePage() {
   async function exportTsv() {
     if (!cycle) return;
     const tsv = await buildTestingCycleTsv(cycle.id);
-    downloadText(`testing_cycle_${cycle.startDate}_to_${cycle.endDate}.tsv`, tsv);
+    const saved = await saveTextFile(`testing_cycle_${cycle.startDate}_to_${cycle.endDate}.tsv`, tsv);
+    setExportMsg(saved ? "Testing list saved." : "Export canceled.");
   }
 
-  const registeredIds = new Set(roster.map((r) => r.id));
-  const addable = allStudents.filter((s) => s.isActive && !registeredIds.has(s.id));
+  const visibleCandidates = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (q === "") return candidates;
+    return candidates.filter((s) => `${s.firstName} ${s.lastName}`.toLowerCase().includes(q));
+  }, [candidates, filter]);
 
   return (
     <>
@@ -108,6 +113,7 @@ export function TestingCyclePage() {
       />
 
       {error && <div className="mb-4 rounded-md border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-700">{error}</div>}
+      {exportMsg && <div className="mb-4 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3 text-sm">{exportMsg}</div>}
 
       <div className="mb-5 flex flex-wrap items-end gap-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] p-4">
         <label className="block">
@@ -136,12 +142,12 @@ export function TestingCyclePage() {
         </div>
       )}
 
-      <StudentSearchAdd students={addable} onAdd={register} placeholder="Type a name to register a student to test…" />
-
+      {/* Registered-to-test list */}
+      <h2 className="mb-2 text-sm font-semibold">Registered to test ({roster.length})</h2>
       {roster.length === 0 ? (
-        <EmptyState title="No students registered yet">Search above to register the students who are testing this cycle.</EmptyState>
+        <EmptyState title="No students registered yet">Register students from the list below — check their attendance first.</EmptyState>
       ) : (
-        <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
+        <div className="mb-6 overflow-hidden rounded-lg border border-[var(--color-border)]">
           <table className="w-full text-sm">
             <thead className="bg-[var(--color-surface-2)] text-left text-xs uppercase tracking-wide text-[var(--color-fg-muted)]">
               <tr>
@@ -183,6 +189,48 @@ export function TestingCyclePage() {
           </table>
         </div>
       )}
+
+      {/* All active students with attendance — register from here */}
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <h2 className="text-sm font-semibold">All students — attendance this cycle</h2>
+        <TextInput value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter by name…" className="w-56" />
+      </div>
+      <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
+        <table className="w-full text-sm">
+          <thead className="bg-[var(--color-surface-2)] text-left text-xs uppercase tracking-wide text-[var(--color-fg-muted)]">
+            <tr>
+              <th className="px-3 py-2 font-medium">Student</th>
+              <th className="px-3 py-2 font-medium">Age</th>
+              <th className="px-3 py-2 font-medium">Belt</th>
+              <th className="px-3 py-2 font-medium text-right">Attendance</th>
+              <th className="px-3 py-2 text-right"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {visibleCandidates.map((s) => {
+              const age = ageFromDob(s.dateOfBirth);
+              return (
+                <tr key={s.id} className="border-t border-[var(--color-border)]">
+                  <td className="px-3 py-2">{s.firstName} {s.lastName}</td>
+                  <td className="px-3 py-2">{age ?? "—"}</td>
+                  <td className="px-3 py-2"><BeltBadge rank={s.rank} size="sm" /></td>
+                  <td className="px-3 py-2 text-right tabular-nums">{s.attendanceThisCycle}</td>
+                  <td className="px-3 py-2 text-right">
+                    {s.registered ? (
+                      <span className="text-xs text-[var(--color-fg-muted)]">Registered ✓</span>
+                    ) : (
+                      <Button variant="secondary" onClick={() => register(s.id)} className="px-2 py-1 text-xs"><UserPlus size={14} />Register</Button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+            {visibleCandidates.length === 0 && (
+              <tr><td colSpan={5} className="p-6 text-center text-sm text-[var(--color-fg-muted)]">No students match.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </>
   );
 }

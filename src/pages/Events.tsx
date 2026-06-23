@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { Download, Plus, Trash2 } from "lucide-react";
 
 import { PageHeader } from "@/components/PageHeader";
 import { BeltBadge } from "@/components/BeltBadge";
@@ -9,6 +9,7 @@ import { StudentSearchAdd } from "@/components/StudentSearchAdd";
 import { EventForm } from "./EventForm";
 import {
   addToRoster,
+  buildEventRosterTsv,
   getEventRoster,
   listEvents,
   listStudents,
@@ -16,6 +17,7 @@ import {
   type StudentRow,
 } from "@/db/repos";
 import type { EventRow } from "@/db/schema";
+import { saveTextFile } from "@/lib/download";
 import { prettyDate } from "@/lib/format";
 
 export function EventsPage() {
@@ -81,6 +83,7 @@ export function EventsPage() {
 function EventDetail({ event, onClose, onEdit }: { event: EventRow; onClose: () => void; onEdit: () => void }) {
   const [roster, setRoster] = useState<StudentRow[]>([]);
   const [allStudents, setAllStudents] = useState<StudentRow[]>([]);
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
 
   async function load() {
     const [r, all] = await Promise.all([getEventRoster(event.id), listStudents()]);
@@ -102,12 +105,19 @@ function EventDetail({ event, onClose, onEdit }: { event: EventRow; onClose: () 
     await removeFromRoster(event.id, studentId);
     await load();
   }
+  async function exportTsv() {
+    const tsv = await buildEventRosterTsv(event.id);
+    const safe = event.name.replace(/[^a-z0-9]+/gi, "_");
+    const saved = await saveTextFile(`${safe}_roster.tsv`, tsv);
+    setExportMsg(saved ? "Roster saved." : "Export canceled.");
+  }
 
   return (
     <Drawer open onClose={onClose} title={event.name} width="max-w-2xl"
       footer={
         <div className="flex items-center justify-between">
           <Button variant="ghost" onClick={onEdit}>Edit details</Button>
+          <Button variant="secondary" onClick={exportTsv} disabled={roster.length === 0}><Download size={16} />Export roster</Button>
         </div>
       }>
       <div className="mb-4 text-sm text-[var(--color-fg-muted)]">
@@ -115,6 +125,7 @@ function EventDetail({ event, onClose, onEdit }: { event: EventRow; onClose: () 
         {event.location ? ` · ${event.location}` : ""}
       </div>
       {event.notes && <p className="mb-4 whitespace-pre-wrap text-sm">{event.notes}</p>}
+      {exportMsg && <div className="mb-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-2 text-sm">{exportMsg}</div>}
 
       <StudentSearchAdd students={addable} onAdd={add} placeholder="Type a name to add to the roster…" />
 

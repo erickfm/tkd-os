@@ -6,9 +6,13 @@ import { fileURLToPath } from "node:url";
 
 import { __setTestDb, createDb } from "./client";
 import {
+  addToRoster,
+  buildEventRosterTsv,
   buildTestingCycleTsv,
+  createEvent,
   createStudent,
   getCurrentCycle,
+  getCycleCandidates,
   getCycleRegistrations,
   getDashboardStats,
   getOrCreateSession,
@@ -185,5 +189,46 @@ describe("testing cycle", () => {
     expect(rows.find((line) => line.startsWith("Ex Port\t"))).toContain(rank.name);
 
     await promoteCycle(cycle.id); // clears registrations for any later runs
+  });
+
+  it("lists all active students with cycle attendance and a registered flag", async () => {
+    const rank = await lowestRegularColorRank();
+    const cycle = await getCurrentCycle();
+    await updateCycleDates(cycle.id, "2025-01-01", "2025-12-31");
+    const id = await createStudent(makeInput({ firstName: "Cand", lastName: "Idate", beltRankId: rank.id }));
+
+    const inSession = await getOrCreateSession("2025-05-05", "adult");
+    await setAttendance(inSession, id, "present");
+    const outSession = await getOrCreateSession("2022-05-05", "adult");
+    await setAttendance(outSession, id, "present");
+
+    let me = (await getCycleCandidates(cycle.id)).find((c) => c.id === id)!;
+    expect(me.attendanceThisCycle).toBe(1);
+    expect(me.registered).toBe(false);
+
+    await registerToTest(cycle.id, id);
+    me = (await getCycleCandidates(cycle.id)).find((c) => c.id === id)!;
+    expect(me.registered).toBe(true);
+
+    await unregisterFromTest(cycle.id, id);
+  });
+});
+
+describe("event roster export", () => {
+  it("exports name, age, track, and belt as TSV", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "Seminar", lastName: "Goer", beltRankId: rank.id }));
+    const eventId = await createEvent({
+      name: "Spring Seminar", eventDate: "2025-03-01", eventTime: null,
+      eventType: "Seminar", location: null, notes: null,
+    });
+    await addToRoster(eventId, id);
+
+    const tsv = await buildEventRosterTsv(eventId);
+    const [header, ...rows] = tsv.split("\n");
+    expect(header).toBe(["Name", "Age", "Track", "Belt", "Phone", "Email"].join("\t"));
+    const line = rows.find((l) => l.startsWith("Seminar Goer\t"))!;
+    expect(line).toContain(rank.name);
+    expect(line).toContain("Jr./Adult");
   });
 });

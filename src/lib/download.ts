@@ -1,12 +1,18 @@
-/** Trigger a browser-style file download of text content from the webview. */
-export function downloadText(filename: string, text: string): void {
-  const blob = new Blob([text], { type: "text/tab-separated-values;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+/**
+ * Save text to a file the user picks via the native OS "Save As" dialog.
+ * Returns true if a file was written, false if the user canceled.
+ *
+ * Lazy imports keep the Tauri runtime out of the Node/test import graph
+ * (same pattern as db/client.ts).
+ */
+export async function saveTextFile(defaultName: string, text: string): Promise<boolean> {
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const { invoke } = await import("@tauri-apps/api/core");
+  const path = await save({
+    defaultPath: defaultName,
+    filters: [{ name: "Tab-separated values", extensions: ["tsv"] }],
+  });
+  if (!path) return false;
+  await invoke("write_text_file", { path, contents: text });
+  return true;
 }

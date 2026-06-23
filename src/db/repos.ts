@@ -411,6 +411,25 @@ export async function removeFromRoster(eventId: number, studentId: number): Prom
     .where(and(eq(eventRoster.eventId, eventId), eq(eventRoster.studentId, studentId)));
 }
 
+/** Tab-separated export of an event roster: name, age, track, belt, phone, email. */
+export async function buildEventRosterTsv(eventId: number): Promise<string> {
+  const roster = await getEventRoster(eventId);
+  const header = ["Name", "Age", "Track", "Belt", "Phone", "Email"];
+  const lines = [header.join("\t")];
+  for (const s of roster) {
+    const age = ageFromDob(s.dateOfBirth);
+    lines.push([
+      `${s.firstName} ${s.lastName}`,
+      age == null ? "" : String(age),
+      s.track === "tiger" ? "Tiger Cubs" : "Jr./Adult",
+      s.rank.name,
+      s.phone ?? "",
+      s.email ?? "",
+    ].join("\t"));
+  }
+  return lines.join("\n");
+}
+
 // ----------------------------------------------------------------------------
 // Testing cycle (current testing period + registration list)
 // ----------------------------------------------------------------------------
@@ -548,6 +567,41 @@ async function presentCountsInRange(
     )
     .groupBy(attendanceRecords.studentId);
   return new Map(rows.map((r) => [r.studentId, Number(r.n)]));
+}
+
+export interface CandidateRow extends StudentRow {
+  attendanceThisCycle: number;
+  registered: boolean;
+}
+
+/** All active students with their attendance in this cycle + whether registered. */
+export async function getCycleCandidates(cycleId: number): Promise<CandidateRow[]> {
+  const db = await getDb();
+  const cycle = await getCycleById(cycleId);
+  const rows = await db
+    .select({ s: students, ...rankCols, ptt: studentProgress.permissionToTest })
+    .from(students)
+    .innerJoin(beltRanks, eq(students.beltRankId, beltRanks.id))
+    .leftJoin(studentProgress, eq(studentProgress.studentId, students.id))
+    .where(eq(students.isActive, true))
+    .orderBy(asc(students.lastName), asc(students.firstName));
+
+  const ids = rows.map((x) => x.s.id);
+  const attendance = await presentCountsInRange(ids, cycle.startDate, cycle.endDate);
+
+  const reg = await db
+    .select({ studentId: testingRegistration.studentId })
+    .from(testingRegistration)
+    .where(eq(testingRegistration.cycleId, cycleId));
+  const registered = new Set(reg.map((r) => r.studentId));
+
+  return rows.map((x) => ({
+    ...x.s,
+    rank: toRank(x),
+    permissionToTest: Boolean(x.ptt),
+    attendanceThisCycle: attendance.get(x.s.id) ?? 0,
+    registered: registered.has(x.s.id),
+  }));
 }
 
 /**
