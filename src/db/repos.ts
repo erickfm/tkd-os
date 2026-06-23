@@ -736,6 +736,25 @@ export async function setAttendance(
   }
 }
 
+export interface StudentAttendanceSummary {
+  total: number;
+  sinceLastPromotion: number;
+  recent: { date: string; classType: string }[];
+}
+
+/** A student's present-class history (most recent first) + totals. */
+export async function getStudentAttendance(studentId: number): Promise<StudentAttendanceSummary> {
+  const db = await getDb();
+  const rows = await db
+    .select({ date: attendanceSessions.sessionDate, classType: attendanceSessions.classType })
+    .from(attendanceRecords)
+    .innerJoin(attendanceSessions, eq(attendanceRecords.sessionId, attendanceSessions.id))
+    .where(and(eq(attendanceRecords.studentId, studentId), eq(attendanceRecords.status, "present")))
+    .orderBy(desc(attendanceSessions.sessionDate));
+  const sinceLastPromotion = await classesSincePromotion(studentId);
+  return { total: rows.length, sinceLastPromotion, recent: rows };
+}
+
 /** Count of present classes since the student's last promotion. */
 export async function classesSincePromotion(studentId: number): Promise<number> {
   const db = await getDb();

@@ -16,6 +16,7 @@ import {
   getCycleRegistrations,
   getDashboardStats,
   getOrCreateSession,
+  getStudentAttendance,
   listBeltRanks,
   listStudents,
   promoteCycle,
@@ -212,6 +213,23 @@ describe("testing cycle", () => {
     expect(me.registered).toBe(true);
 
     await unregisterFromTest(cycle.id, id);
+  });
+});
+
+describe("student attendance history", () => {
+  it("totals only present classes and lists them most-recent first", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "Atten", lastName: "Dance", beltRankId: rank.id }));
+    const s1 = await getOrCreateSession("2025-02-01", "adult");
+    const s2 = await getOrCreateSession("2025-02-08", "adult");
+    const s3 = await getOrCreateSession("2025-02-15", "adult");
+    await setAttendance(s1, id, "present");
+    await setAttendance(s2, id, "present");
+    await setAttendance(s3, id, "absent"); // must not count
+
+    const a = await getStudentAttendance(id);
+    expect(a.total).toBe(2);
+    expect(a.recent.map((r) => r.date)).toEqual(["2025-02-08", "2025-02-01"]);
   });
 });
 
