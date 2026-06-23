@@ -85,6 +85,7 @@ export const students = sqliteTable(
     isStarterStudent: integer("is_starter_student", { mode: "boolean" })
       .notNull()
       .default(false),
+    trialStartDate: text("trial_start_date"),
     notes: text("notes"),
     isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
     legacyId: integer("legacy_id"),

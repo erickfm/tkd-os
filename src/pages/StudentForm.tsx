@@ -39,7 +39,7 @@ function blank(): StudentInput {
     guardian1Name: null, guardian1Phone: null, guardian1Email: null,
     guardian2Name: null, guardian2Phone: null, guardian2Email: null,
     emergencyContact: null, track: "regular", ageGroup: "jr",
-    beltRankId: 0, beltSize: null, joinDate: today(), notes: null,
+    beltRankId: 0, beltSize: null, joinDate: today(), trialStartDate: null, notes: null,
   };
 }
 
@@ -65,7 +65,8 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
             emergencyContact: editing.emergencyContact,
             track: editing.track, ageGroup: editing.ageGroup,
             beltRankId: editing.beltRankId, beltSize: editing.beltSize,
-            joinDate: editing.joinDate, notes: editing.notes,
+            joinDate: editing.joinDate, trialStartDate: editing.trialStartDate,
+            notes: editing.notes,
           }
         : blank(),
     );
@@ -215,9 +216,14 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
         </Field>
       </div>
 
-      <Field label="Join date">
-        <TextInput type="date" value={form.joinDate} onChange={(e) => set("joinDate", e.target.value)} />
-      </Field>
+      <div className="grid grid-cols-2 gap-x-3">
+        <Field label="Join date">
+          <TextInput type="date" value={form.joinDate} onChange={(e) => set("joinDate", e.target.value)} />
+        </Field>
+        <Field label="Trial start date" hint="Leave blank if not on a trial (6 weeks).">
+          <TextInput type="date" value={form.trialStartDate ?? ""} onChange={(e) => set("trialStartDate", e.target.value || null)} />
+        </Field>
+      </div>
 
       <div className="grid grid-cols-2 gap-x-3">
         <Field label="Phone"><TextInput value={form.phone ?? ""} onChange={(e) => set("phone", e.target.value || null)} /></Field>

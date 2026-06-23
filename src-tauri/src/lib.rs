@@ -45,6 +45,12 @@ pub fn run() {
             sql: include_str!("../migrations/0006_testing_date.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 7,
+            description: "trial_start",
+            sql: include_str!("../migrations/0007_trial_start.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()

@@ -143,6 +143,7 @@ export interface StudentInput {
   beltRankId: number;
   beltSize: string | null;
   joinDate: string;
+  trialStartDate: string | null;
   notes: string | null;
 }
 
@@ -150,7 +151,7 @@ export async function createStudent(input: StudentInput): Promise<number> {
   const db = await getDb();
   const [row] = await db
     .insert(students)
-    .values(input)
+    .values({ ...input, isStarterStudent: input.trialStartDate != null })
     .returning({ id: students.id });
   // 1:1 progress row (spec invariant)
   await db.insert(studentProgress).values({ studentId: row.id });
@@ -164,7 +165,7 @@ export async function updateStudent(
   const db = await getDb();
   await db
     .update(students)
-    .set({ ...input, updatedAt: sql`CURRENT_TIMESTAMP` })
+    .set({ ...input, isStarterStudent: input.trialStartDate != null, updatedAt: sql`CURRENT_TIMESTAMP` })
     .where(eq(students.id, id));
 }
 
@@ -816,7 +817,7 @@ export interface DashboardStats {
   black: number;
   permissionToTest: number;
   upcomingEvents: number;
-  activeCourses: number;
+  onTrial: number;
 }
 
 export async function getDashboardStats(): Promise<DashboardStats> {
@@ -824,7 +825,6 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   const active = all.filter((s) => s.isActive);
   const t = today();
   const evs = await listEvents();
-  const courses = await listStarterCourses();
   return {
     activeTotal: active.length,
     tiger: active.filter((s) => s.track === "tiger").length,
@@ -832,8 +832,86 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     black: active.filter((s) => s.rank.degree != null).length,
     permissionToTest: active.filter((s) => s.permissionToTest).length,
     upcomingEvents: evs.filter((e) => e.isActive && e.eventDate >= t).length,
-    activeCourses: courses.filter((c) => c.endDate >= t).length,
+    onTrial: active.filter((s) => s.trialStartDate != null).length,
   };
+}
+
+// ----------------------------------------------------------------------------
+// Trials (6-week trial period per student) + dashboard alerts
+// ----------------------------------------------------------------------------
+
+const TRIAL_DAYS = 42; // 6 weeks
+const ABSENCE_DAYS = 14;
+
+function addDays(iso: string, days: number): string {
+  const d = new Date(iso + "T00:00:00");
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+function daysBetween(fromIso: string, toIso: string): number {
+  const ms = new Date(toIso + "T00:00:00").getTime() - new Date(fromIso + "T00:00:00").getTime();
+  return Math.round(ms / 86_400_000);
+}
+
+export interface TrialRow extends StudentRow {
+  trialStart: string;
+  trialEnd: string;
+  daysLeft: number;
+}
+
+/** Put a student on a trial (start date) or take them off it (null). */
+export async function setTrial(studentId: number, startDate: string | null): Promise<void> {
+  const db = await getDb();
+  await db
+    .update(students)
+    .set({ trialStartDate: startDate, isStarterStudent: startDate != null, updatedAt: sql`CURRENT_TIMESTAMP` })
+    .where(eq(students.id, studentId));
+}
+
+/** Active students currently on a trial, soonest-ending first. */
+export async function listTrialStudents(): Promise<TrialRow[]> {
+  const all = await listStudents();
+  const t = today();
+  return all
+    .filter((s) => s.isActive && s.trialStartDate)
+    .map((s) => {
+      const trialEnd = addDays(s.trialStartDate as string, TRIAL_DAYS);
+      return { ...s, trialStart: s.trialStartDate as string, trialEnd, daysLeft: daysBetween(t, trialEnd) };
+    })
+    .sort((a, b) => a.daysLeft - b.daysLeft);
+}
+
+export interface DashboardAlerts {
+  trialsEndingSoon: { id: number; name: string; daysLeft: number }[];
+  recurringAbsences: { id: number; name: string; lastPresent: string }[];
+}
+
+/** Trials ending within a week + active students who attended before but not in 14 days. */
+export async function getDashboardAlerts(): Promise<DashboardAlerts> {
+  const t = today();
+  const trialsEndingSoon = (await listTrialStudents())
+    .filter((s) => s.daysLeft >= 0 && s.daysLeft <= 7)
+    .map((s) => ({ id: s.id, name: `${s.firstName} ${s.lastName}`, daysLeft: s.daysLeft }));
+
+  const db = await getDb();
+  const lastRows = await db
+    .select({ studentId: attendanceRecords.studentId, last: sql<string>`max(${attendanceSessions.sessionDate})` })
+    .from(attendanceRecords)
+    .innerJoin(attendanceSessions, eq(attendanceRecords.sessionId, attendanceSessions.id))
+    .where(eq(attendanceRecords.status, "present"))
+    .groupBy(attendanceRecords.studentId);
+  const lastByStudent = new Map(lastRows.map((r) => [r.studentId, r.last]));
+  const cutoff = addDays(t, -ABSENCE_DAYS);
+
+  const all = await listStudents();
+  const recurringAbsences = all
+    .filter((s) => s.isActive)
+    .map((s) => ({ s, last: lastByStudent.get(s.id) }))
+    .filter((x) => x.last != null && x.last < cutoff) // attended before, but not recently
+    .map((x) => ({ id: x.s.id, name: `${x.s.firstName} ${x.s.lastName}`, lastPresent: x.last as string }))
+    .sort((a, b) => a.lastPresent.localeCompare(b.lastPresent));
+
+  return { trialsEndingSoon, recurringAbsences };
 }
 
 // ----------------------------------------------------------------------------

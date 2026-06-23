@@ -49,7 +49,8 @@ Core student profile. One row per student.
 | `belt_rank_id` | INTEGER | NOT NULL | — | FK → `belt_ranks.id`; current belt |
 | `belt_size` | VARCHAR(10) | NULL | — | Belt size (e.g. `'0'`, `'00'`, `'4'`); see [Belt Sizes](#belt-sizes) |
 | `join_date` | DATE | NOT NULL | today | Date student joined the dojang |
-| `is_starter_student` | BOOLEAN | NOT NULL | `FALSE` | Whether student is on or has been through a starter course |
+| `is_starter_student` | BOOLEAN | NOT NULL | `FALSE` | Whether student is/was on a trial (kept in sync with `trial_start_date`) |
+| `trial_start_date` | DATE | NULL | — | Start of the student's 6-week trial; trial end is derived (+42 days). NULL = not on a trial |
 | `notes` | TEXT | NULL | — | Free-form notes (medical info, goals, parent name, etc.) |
 | `is_active` | BOOLEAN | NOT NULL | `TRUE` | Soft-delete flag. For legacy imports, set from the MSS `Activity Level` (1 = active) — not the termination date |
 | `legacy_id` | INTEGER | NULL | — | Source MSS `Student ID` for imported students (lets legacy data re-sync exactly); NULL for app-created students |

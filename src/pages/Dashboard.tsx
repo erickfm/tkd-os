@@ -3,21 +3,23 @@ import { useNavigate } from "react-router-dom";
 import { Award, CalendarDays, GraduationCap, Sparkles, Users } from "lucide-react";
 
 import { PageHeader } from "@/components/PageHeader";
-import { getDashboardStats, listEvents, type DashboardStats } from "@/db/repos";
+import { getDashboardAlerts, getDashboardStats, listEvents, type DashboardAlerts, type DashboardStats } from "@/db/repos";
 import type { EventRow } from "@/db/schema";
 import { prettyDate, today } from "@/lib/format";
 
 export function DashboardPage() {
   const navigate = useNavigate();
   const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [alerts, setAlerts] = useState<DashboardAlerts | null>(null);
   const [upcoming, setUpcoming] = useState<EventRow[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
-        const [s, evs] = await Promise.all([getDashboardStats(), listEvents()]);
+        const [s, a, evs] = await Promise.all([getDashboardStats(), getDashboardAlerts(), listEvents()]);
         setStats(s);
+        setAlerts(a);
         const t = today();
         setUpcoming(evs.filter((e) => e.isActive && e.eventDate >= t).slice(0, 5));
       } catch (e) {
@@ -41,8 +43,35 @@ export function DashboardPage() {
             <Stat icon={<GraduationCap size={18} />} label="Black Belts" value={stats?.black} onClick={() => navigate("/students?filter=black")} />
             <Stat icon={<Award size={18} />} label="Ready to Test" value={stats?.permissionToTest} accent onClick={() => navigate("/students?filter=ptt")} />
             <Stat icon={<CalendarDays size={18} />} label="Upcoming Events" value={stats?.upcomingEvents} onClick={() => navigate("/events")} />
-            <Stat icon={<Sparkles size={18} />} label="Active Courses" value={stats?.activeCourses} onClick={() => navigate("/starter-courses")} />
+            <Stat icon={<Sparkles size={18} />} label="On Trial" value={stats?.onTrial} onClick={() => navigate("/trials")} />
           </div>
+
+          {alerts && (alerts.trialsEndingSoon.length > 0 || alerts.recurringAbsences.length > 0) && (
+            <div className="mt-8">
+              <h2 className="mb-3 text-lg font-semibold tracking-tight">Alerts</h2>
+              <div className="grid gap-4 md:grid-cols-2">
+                {alerts.trialsEndingSoon.length > 0 && (
+                  <AlertCard title="Trials ending soon">
+                    {alerts.trialsEndingSoon.map((a) => (
+                      <AlertRow key={a.id} onClick={() => navigate("/trials")} name={a.name}
+                        detail={`${a.daysLeft} day${a.daysLeft === 1 ? "" : "s"} left`} tone="amber" />
+                    ))}
+                  </AlertCard>
+                )}
+                {alerts.recurringAbsences.length > 0 && (
+                  <AlertCard title={`Recurring absences (${alerts.recurringAbsences.length})`}>
+                    {alerts.recurringAbsences.slice(0, 10).map((a) => (
+                      <AlertRow key={a.id} onClick={() => navigate("/students")} name={a.name}
+                        detail={`last seen ${prettyDate(a.lastPresent)}`} />
+                    ))}
+                    {alerts.recurringAbsences.length > 10 && (
+                      <div className="px-3 py-2 text-xs text-[var(--color-fg-muted)]">+{alerts.recurringAbsences.length - 10} more</div>
+                    )}
+                  </AlertCard>
+                )}
+              </div>
+            </div>
+          )}
 
           <h2 className="mb-3 mt-8 text-lg font-semibold tracking-tight">Upcoming events</h2>
           {upcoming.length === 0 ? (
@@ -67,6 +96,24 @@ export function DashboardPage() {
         </>
       )}
     </>
+  );
+}
+
+function AlertCard({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
+      <div className="border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm font-medium">{title}</div>
+      <div className="max-h-64 overflow-auto">{children}</div>
+    </div>
+  );
+}
+
+function AlertRow({ name, detail, tone, onClick }: { name: string; detail: string; tone?: "amber"; onClick?: () => void }) {
+  return (
+    <button onClick={onClick} className="flex w-full items-center justify-between gap-3 border-t border-[var(--color-border)] px-3 py-2 text-left text-sm first:border-t-0 hover:bg-[var(--color-surface-2)]">
+      <span>{name}</span>
+      <span className={`text-xs ${tone === "amber" ? "text-amber-600" : "text-[var(--color-fg-muted)]"}`}>{detail}</span>
+    </button>
   );
 }
 

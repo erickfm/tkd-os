@@ -14,9 +14,12 @@ import {
   getCurrentCycle,
   getCycleCandidates,
   getCycleRegistrations,
+  getDashboardAlerts,
   getDashboardStats,
   getOrCreateSession,
   getStudentAttendance,
+  listTrialStudents,
+  setTrial,
   listBeltRanks,
   listStudents,
   minClassesToTest,
@@ -47,6 +50,7 @@ beforeAll(() => {
   sqlite.exec(readFileSync(join(migrationsDir, "0004_testing_cycle.sql"), "utf8"));
   sqlite.exec(readFileSync(join(migrationsDir, "0005_legacy_id.sql"), "utf8"));
   sqlite.exec(readFileSync(join(migrationsDir, "0006_testing_date.sql"), "utf8"));
+  sqlite.exec(readFileSync(join(migrationsDir, "0007_trial_start.sql"), "utf8"));
 
   const blackId = (sqlite
     .prepare("SELECT id FROM belt_ranks WHERE track='regular' AND degree IS NOT NULL ORDER BY sort_order LIMIT 1")
@@ -112,7 +116,7 @@ function makeInput(over: Partial<StudentInput>): StudentInput {
     guardian1Name: null, guardian1Phone: null, guardian1Email: null,
     guardian2Name: null, guardian2Phone: null, guardian2Email: null,
     emergencyContact: null, track: "regular", ageGroup: "jr",
-    beltRankId: 0, beltSize: null, joinDate: "2024-01-01", notes: null,
+    beltRankId: 0, beltSize: null, joinDate: "2024-01-01", trialStartDate: null, notes: null,
     ...over,
   };
 }
@@ -257,6 +261,49 @@ describe("student attendance history", () => {
     const a = await getStudentAttendance(id);
     expect(a.total).toBe(2);
     expect(a.recent.map((r) => r.date)).toEqual(["2025-02-08", "2025-02-01"]);
+  });
+});
+
+function isoDaysAgo(n: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+
+describe("trials + dashboard alerts", () => {
+  it("derives trial end (+6 weeks) and flags trials ending within a week", async () => {
+    const rank = await lowestRegularColorRank();
+    const soonId = await createStudent(makeInput({ firstName: "Soon", lastName: "Ending", beltRankId: rank.id }));
+    const farId = await createStudent(makeInput({ firstName: "Far", lastName: "Out", beltRankId: rank.id }));
+    await setTrial(soonId, isoDaysAgo(40)); // ends in ~2 days
+    await setTrial(farId, isoDaysAgo(1)); // ends in ~41 days
+
+    const trials = await listTrialStudents();
+    const soon = trials.find((t) => t.id === soonId)!;
+    expect(soon.trialEnd).toBe((() => { const d = new Date(isoDaysAgo(40) + "T00:00:00"); d.setDate(d.getDate() + 42); return d.toISOString().slice(0, 10); })());
+    expect(soon.daysLeft).toBeLessThanOrEqual(7);
+
+    const alerts = await getDashboardAlerts();
+    expect(alerts.trialsEndingSoon.some((a) => a.id === soonId)).toBe(true);
+    expect(alerts.trialsEndingSoon.some((a) => a.id === farId)).toBe(false);
+
+    await setTrial(soonId, null);
+    await setTrial(farId, null);
+    expect((await listTrialStudents()).some((t) => t.id === soonId)).toBe(false);
+  });
+
+  it("flags active students absent >14 days who attended before, not the recent or never-attended", async () => {
+    const rank = await lowestRegularColorRank();
+    const lapsed = await createStudent(makeInput({ firstName: "Lap", lastName: "Sed", beltRankId: rank.id }));
+    const recent = await createStudent(makeInput({ firstName: "Reg", lastName: "Ular", beltRankId: rank.id }));
+    const sOld = await getOrCreateSession(isoDaysAgo(30), "adult");
+    await setAttendance(sOld, lapsed, "present");
+    const sNew = await getOrCreateSession(isoDaysAgo(3), "adult");
+    await setAttendance(sNew, recent, "present");
+
+    const { recurringAbsences } = await getDashboardAlerts();
+    expect(recurringAbsences.some((a) => a.id === lapsed)).toBe(true);
+    expect(recurringAbsences.some((a) => a.id === recent)).toBe(false);
   });
 });
 
