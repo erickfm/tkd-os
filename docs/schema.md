@@ -396,6 +396,10 @@ Used in `attendance_sessions.class_type` and to drive attendance filtering logic
 | `jr-brb` | Jr. Brown, Red & Black | `regular` | `jr` | `jr-brb` |
 | `adult` | Adult | `regular` | `adult` | `jr-wy`, `jr-gbp`, `jr-brb` (all) |
 
+**Cross-class eligibility (students may attend more than one class):**
+- **`jr-wy`** also includes **Tiger Cub Red Stripe** students (they may attend either the Tiger or the Jr. W&Y class).
+- **`adult`** also includes **any active student aged 12+** (by `date_of_birth`), in addition to regular `adult`-age-group students.
+
 ### Class Groups
 
 Used in `belt_ranks.class_group` to assign each regular-track belt to its attendance class.

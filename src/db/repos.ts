@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, gte, inArray, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, lte, or, sql } from "drizzle-orm";
 
 import { getDb } from "./client";
 import {
@@ -178,27 +178,6 @@ export async function setStudentActive(
     .update(students)
     .set({ isActive: active, updatedAt: sql`CURRENT_TIMESTAMP` })
     .where(eq(students.id, id));
-}
-
-/** One-time helper: flag regular-track students 18+ (by DOB) as adults. */
-export async function autoFlagAdultsByDob(minAge = 18): Promise<number> {
-  const db = await getDb();
-  const all = await db
-    .select()
-    .from(students)
-    .where(and(eq(students.track, "regular"), eq(students.ageGroup, "jr")));
-  let n = 0;
-  for (const s of all) {
-    const age = ageFromDob(s.dateOfBirth);
-    if (age != null && age >= minAge) {
-      await db
-        .update(students)
-        .set({ ageGroup: "adult", updatedAt: sql`CURRENT_TIMESTAMP` })
-        .where(eq(students.id, s.id));
-      n++;
-    }
-  }
-  return n;
 }
 
 // ----------------------------------------------------------------------------
@@ -422,9 +401,24 @@ function csvRow(fields: (string | number | null)[]): string {
     .join(",");
 }
 
+// Default export ordering: Tiger Cubs first, then Jr. (white→black), then Adults
+// (white→black); within each group by belt rank, then last name.
+function exportGroupOrder(s: StudentRow): number {
+  if (s.track === "tiger") return 0;
+  return s.ageGroup === "adult" ? 2 : 1;
+}
+function compareForExport(a: StudentRow, b: StudentRow): number {
+  return (
+    exportGroupOrder(a) - exportGroupOrder(b) ||
+    a.rank.sortOrder - b.rank.sortOrder ||
+    a.lastName.localeCompare(b.lastName) ||
+    a.firstName.localeCompare(b.firstName)
+  );
+}
+
 /** CSV export of an event roster: name, age, track, belt, phone, email. */
 export async function buildEventRosterCsv(eventId: number): Promise<string> {
-  const roster = await getEventRoster(eventId);
+  const roster = (await getEventRoster(eventId)).slice().sort(compareForExport);
   const lines = [csvRow(["Name", "Age", "Track", "Belt", "Phone", "Email"])];
   for (const s of roster) {
     const age = ageFromDob(s.dateOfBirth);
@@ -661,7 +655,7 @@ export async function promoteCycle(cycleId: number): Promise<PromotionResult[]> 
  * Each label: student name, the belt they're testing for, and belt size.
  */
 export async function buildBeltLabelsHtml(cycleId: number): Promise<string> {
-  const roster = await getCycleRegistrations(cycleId);
+  const roster = (await getCycleRegistrations(cycleId)).slice().sort(compareForExport);
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const label = (s: TestingRow) => `
       <div class="label">
@@ -704,7 +698,7 @@ export async function buildBeltLabelsHtml(cycleId: number): Promise<string> {
 
 /** CSV export of the testing list: name, age, belt, testing-for, size, classes. */
 export async function buildTestingCycleCsv(cycleId: number): Promise<string> {
-  const roster = await getCycleRegistrations(cycleId);
+  const roster = (await getCycleRegistrations(cycleId)).slice().sort(compareForExport);
   const lines = [csvRow(["Name", "Age", "Current Belt", "Testing For", "Belt Size", "Classes", "Min", "Eligible"])];
   for (const s of roster) {
     const age = ageFromDob(s.dateOfBirth);
@@ -753,13 +747,37 @@ export async function getOrCreateSession(
 /** Active students eligible for a given class type, per the spec's filtering. */
 export async function studentsForClass(classType: ClassType): Promise<StudentRow[]> {
   const db = await getDb();
-  const conds = [eq(students.isActive, true)];
+
+  // Adult class: regular adults, plus ANY active student aged 12+ (by DOB) —
+  // older juniors may attend the adult class too. Age isn't stored in SQL, so
+  // filter in JS over the active roster.
+  if (classType === "adult") {
+    const all = await listStudents();
+    return all
+      .filter((s) => s.isActive)
+      .filter((s) =>
+        (s.track === "regular" && s.ageGroup === "adult") ||
+        (ageFromDob(s.dateOfBirth) ?? -1) >= 12,
+      )
+      .sort((a, b) => a.rank.sortOrder - b.rank.sortOrder || a.lastName.localeCompare(b.lastName));
+  }
+
+  let where;
   if (classType === "tiger") {
-    conds.push(eq(students.track, "tiger"));
-  } else if (classType === "adult") {
-    conds.push(eq(students.track, "regular"), eq(students.ageGroup, "adult"));
+    where = and(eq(students.isActive, true), eq(students.track, "tiger"));
+  } else if (classType === "jr-wy") {
+    // Jr. White & Yellow: regular jr W/Y students, plus Tiger Cub Red Stripes,
+    // who may attend either the Tiger or the Jr. W&Y class.
+    where = and(
+      eq(students.isActive, true),
+      or(
+        and(eq(students.track, "regular"), eq(students.ageGroup, "jr"), eq(beltRanks.classGroup, "jr-wy")),
+        and(eq(students.track, "tiger"), eq(beltRanks.name, "Tiger Cub Red Stripe")),
+      ),
+    );
   } else {
-    conds.push(
+    where = and(
+      eq(students.isActive, true),
       eq(students.track, "regular"),
       eq(students.ageGroup, "jr"),
       eq(beltRanks.classGroup, classType),
@@ -770,7 +788,7 @@ export async function studentsForClass(classType: ClassType): Promise<StudentRow
     .from(students)
     .innerJoin(beltRanks, eq(students.beltRankId, beltRanks.id))
     .leftJoin(studentProgress, eq(studentProgress.studentId, students.id))
-    .where(and(...conds))
+    .where(where)
     .orderBy(asc(beltRanks.sortOrder), asc(students.lastName));
   return rows.map((x) => ({ ...x.s, rank: toRank(x), permissionToTest: Boolean(x.ptt) }));
 }

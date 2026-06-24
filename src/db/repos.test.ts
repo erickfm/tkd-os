@@ -27,6 +27,7 @@ import {
   promoteCycle,
   registerToTest,
   setAttendance,
+  studentsForClass,
   unregisterFromTest,
   updateCycle,
   updateProgress,
@@ -320,6 +321,28 @@ describe("trials + dashboard alerts", () => {
   });
 });
 
+describe("attendance class eligibility", () => {
+  it("adult class includes any active student aged 12+ (by DOB), not younger ones", async () => {
+    const rank = await lowestRegularColorRank();
+    const teen = await createStudent(makeInput({ firstName: "Teen", lastName: "Ager", beltRankId: rank.id, ageGroup: "jr", dateOfBirth: "2010-01-01" }));
+    const kid = await createStudent(makeInput({ firstName: "Lil", lastName: "Kid", beltRankId: rank.id, ageGroup: "jr", dateOfBirth: "2020-01-01" }));
+    const adultClass = await studentsForClass("adult");
+    expect(adultClass.some((s) => s.id === teen)).toBe(true);
+    expect(adultClass.some((s) => s.id === kid)).toBe(false);
+  });
+
+  it("Jr. White & Yellow class includes Tiger Cub Red Stripes", async () => {
+    const ranks = await listBeltRanks();
+    const redStripe = ranks.find((r) => r.name === "Tiger Cub Red Stripe")!;
+    const tigerWhite = ranks.find((r) => r.track === "tiger" && r.sortOrder === 0)!;
+    const rs = await createStudent(makeInput({ firstName: "Red", lastName: "Stripe", track: "tiger", beltRankId: redStripe.id }));
+    const tw = await createStudent(makeInput({ firstName: "Tiny", lastName: "White", track: "tiger", beltRankId: tigerWhite.id }));
+    const jrwy = await studentsForClass("jr-wy");
+    expect(jrwy.some((s) => s.id === rs)).toBe(true); // red stripe attends Jr. W&Y too
+    expect(jrwy.some((s) => s.id === tw)).toBe(false); // a plain tiger cub does not
+  });
+});
+
 describe("event roster export", () => {
   it("exports name, age, track, and belt as CSV", async () => {
     const rank = await lowestRegularColorRank();
@@ -336,5 +359,20 @@ describe("event roster export", () => {
     const line = rows.find((l) => l.startsWith("Seminar Goer,"))!;
     expect(line).toContain(rank.name);
     expect(line).toContain("Jr./Adult");
+  });
+
+  it("orders exports Tiger Cubs, then Juniors, then Adults", async () => {
+    const ranks = await listBeltRanks();
+    const tigerWhite = ranks.find((r) => r.track === "tiger" && r.sortOrder === 0)!;
+    const jrWhite = ranks.find((r) => r.track === "regular" && r.sortOrder === 0)!;
+    const tiger = await createStudent(makeInput({ firstName: "Aaa", lastName: "Tigerkid", track: "tiger", beltRankId: tigerWhite.id }));
+    const jr = await createStudent(makeInput({ firstName: "Bbb", lastName: "Juniorkid", track: "regular", ageGroup: "jr", beltRankId: jrWhite.id }));
+    const adult = await createStudent(makeInput({ firstName: "Ccc", lastName: "Adultone", track: "regular", ageGroup: "adult", beltRankId: jrWhite.id }));
+    const eventId = await createEvent({ name: "Order Test", eventDate: "2025-04-01", eventTime: null, eventType: "Demo", location: null, notes: null });
+    for (const id of [adult, jr, tiger]) await addToRoster(eventId, id); // added out of group order
+
+    const order = (await buildEventRosterCsv(eventId)).split("\r\n").slice(1).map((r) => r.split(",")[0]);
+    expect(order.indexOf("Aaa Tigerkid")).toBeLessThan(order.indexOf("Bbb Juniorkid"));
+    expect(order.indexOf("Bbb Juniorkid")).toBeLessThan(order.indexOf("Ccc Adultone"));
   });
 });

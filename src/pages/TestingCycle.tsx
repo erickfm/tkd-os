@@ -3,7 +3,7 @@ import { Award, Download, Printer, Trash2, UserPlus } from "lucide-react";
 
 import { PageHeader } from "@/components/PageHeader";
 import { BeltBadge } from "@/components/BeltBadge";
-import { Button, EmptyState, TextInput } from "@/components/ui";
+import { Button, EmptyState, Select, TextInput } from "@/components/ui";
 import {
   buildBeltLabelsHtml,
   buildTestingCycleCsv,
@@ -22,6 +22,8 @@ import type { TestingCycle } from "@/db/schema";
 import { saveTextFile } from "@/lib/download";
 import { ageFromDob, prettyDate } from "@/lib/format";
 
+type CandSort = "first" | "last" | "age" | "belt" | "attendance";
+
 export function TestingCyclePage() {
   const [cycle, setCycle] = useState<TestingCycle | null>(null);
   const [start, setStart] = useState("");
@@ -30,6 +32,8 @@ export function TestingCyclePage() {
   const [roster, setRoster] = useState<TestingRow[]>([]);
   const [candidates, setCandidates] = useState<CandidateRow[]>([]);
   const [filter, setFilter] = useState("");
+  const [candSort, setCandSort] = useState<CandSort>("last");
+  const [candDir, setCandDir] = useState<"asc" | "desc">("asc");
   const [results, setResults] = useState<PromotionResult[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -106,9 +110,25 @@ export function TestingCyclePage() {
 
   const visibleCandidates = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    if (q === "") return candidates;
-    return candidates.filter((s) => `${s.firstName} ${s.lastName}`.toLowerCase().includes(q));
-  }, [candidates, filter]);
+    const list = q === ""
+      ? candidates
+      : candidates.filter((s) => `${s.firstName} ${s.lastName}`.toLowerCase().includes(q));
+    const dir = candDir === "asc" ? 1 : -1;
+    const key = (s: CandidateRow): number | string => {
+      switch (candSort) {
+        case "first": return s.firstName.toLowerCase();
+        case "last": return s.lastName.toLowerCase();
+        case "age": return ageFromDob(s.dateOfBirth) ?? -1;
+        case "belt": return `${s.rank.track} ${String(s.rank.sortOrder).padStart(3, "0")}`;
+        case "attendance": return s.attendanceThisCycle;
+      }
+    };
+    return list.slice().sort((a, b) => {
+      const ka = key(a), kb = key(b);
+      const c = ka < kb ? -1 : ka > kb ? 1 : 0;
+      return dir * c || a.lastName.localeCompare(b.lastName);
+    });
+  }, [candidates, filter, candSort, candDir]);
 
   return (
     <>
@@ -209,9 +229,22 @@ export function TestingCyclePage() {
       )}
 
       {/* All active students with attendance — register from here */}
-      <div className="mb-2 flex items-center justify-between gap-3">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-sm font-semibold">All students — attendance this cycle</h2>
-        <TextInput value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter by name…" className="w-56" />
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-[var(--color-fg-muted)]">Sort by</span>
+          <Select value={candSort} onChange={(e) => setCandSort(e.target.value as CandSort)} className="w-36">
+            <option value="first">Name</option>
+            <option value="last">Last name</option>
+            <option value="age">Age</option>
+            <option value="belt">Belt</option>
+            <option value="attendance">Attendance</option>
+          </Select>
+          <Button variant="secondary" onClick={() => setCandDir((d) => (d === "asc" ? "desc" : "asc"))} className="px-2 py-1.5" aria-label="Toggle sort direction">
+            {candDir === "asc" ? "▲" : "▼"}
+          </Button>
+          <TextInput value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter by name…" className="w-48" />
+        </div>
       </div>
       <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
         <table className="w-full text-sm">

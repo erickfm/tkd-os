@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Plus, UserCog, X } from "lucide-react";
+import { Plus, X } from "lucide-react";
 
 import { PageHeader } from "@/components/PageHeader";
 import { BeltBadge } from "@/components/BeltBadge";
 import { Button, EmptyState } from "@/components/ui";
 import { StudentForm } from "./StudentForm";
 import {
-  autoFlagAdultsByDob,
   listBeltRanks,
   listStudents,
   type StudentRow,
@@ -111,23 +110,12 @@ export function StudentsPage() {
     setParams(params, { replace: true });
   }
 
-  async function flagAdults() {
-    const n = await autoFlagAdultsByDob(18);
-    await load();
-    alert(`Flagged ${n} student${n === 1 ? "" : "s"} as Adult (18+ by birthdate).`);
-  }
-
   return (
     <>
       <PageHeader
         title="Students"
         subtitle={rows ? `${filtered.length} shown of ${rows.length} total` : "Loading…"}
-        actions={
-          <>
-            <Button variant="secondary" onClick={flagAdults}><UserCog size={16} />Flag adults</Button>
-            <Button variant="primary" onClick={openNew}><Plus size={16} />Add student</Button>
-          </>
-        }
+        actions={<Button variant="primary" onClick={openNew}><Plus size={16} />Add student</Button>}
       />
 
       {error && (
