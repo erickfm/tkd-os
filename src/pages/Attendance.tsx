@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Check, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Check } from "lucide-react";
 
 import { PageHeader } from "@/components/PageHeader";
 import { BeltBadge } from "@/components/BeltBadge";
@@ -21,6 +21,7 @@ export function AttendancePage() {
   const [sessionId, setSessionId] = useState<number | null>(null);
   const [roster, setRoster] = useState<StudentRow[]>([]);
   const [statuses, setStatuses] = useState<Map<number, string>>(new Map());
+  const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,22 +46,24 @@ export function AttendancePage() {
     })();
   }, [date, classType]);
 
-  async function mark(studentId: number, status: "present" | "absent") {
+  async function toggle(studentId: number) {
     if (sessionId == null) return;
-    const current = statuses.get(studentId);
-    const next = current === status ? "unmarked" : status;
+    const next = statuses.get(studentId) === "present" ? "unmarked" : "present";
     setStatuses((m) => new Map(m).set(studentId, next));
     await setAttendance(sessionId, studentId, next);
   }
 
   const presentCount = roster.filter((r) => statuses.get(r.id) === "present").length;
 
+  const visible = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return roster;
+    return roster.filter((r) => `${r.firstName} ${r.lastName}`.toLowerCase().includes(q));
+  }, [roster, search]);
+
   return (
     <>
-      <PageHeader
-        title="Attendance"
-        subtitle={`${presentCount} present of ${roster.length} in class`}
-      />
+      <PageHeader title="Attendance" subtitle={`${presentCount} present · ${roster.length} in this class`} />
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-44" />
@@ -69,6 +72,7 @@ export function AttendancePage() {
             <option key={ct} value={ct}>{CLASS_TYPE_LABELS[ct]}</option>
           ))}
         </Select>
+        <TextInput value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by name…" className="w-56" />
       </div>
 
       {error && (
@@ -76,52 +80,36 @@ export function AttendancePage() {
       )}
 
       {!error && (
-        <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
-          <table className="w-full text-sm">
-            <thead className="bg-[var(--color-surface-2)] text-left text-xs uppercase tracking-wide text-[var(--color-fg-muted)]">
-              <tr>
-                <th className="px-4 py-2.5 font-medium">Student</th>
-                <th className="px-4 py-2.5 font-medium">Belt</th>
-                <th className="px-4 py-2.5 font-medium text-right">Attendance</th>
-              </tr>
-            </thead>
-            <tbody>
-              {roster.map((r) => {
-                const st = statuses.get(r.id) ?? "unmarked";
+        <>
+          <p className="mb-2 text-xs text-[var(--color-fg-muted)]">Tap a student to mark them present. Tap again to undo.</p>
+          <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
+            <ul>
+              {visible.map((r) => {
+                const present = statuses.get(r.id) === "present";
                 return (
-                  <tr key={r.id} className="border-t border-[var(--color-border)]">
-                    <td className="px-4 py-2.5">{r.firstName} {r.lastName}</td>
-                    <td className="px-4 py-2.5"><BeltBadge rank={r.rank} size="sm" /></td>
-                    <td className="px-4 py-2.5">
-                      <div className="flex justify-end gap-2">
-                        <MarkButton active={st === "present"} tone="present" onClick={() => mark(r.id, "present")}><Check size={15} />Present</MarkButton>
-                        <MarkButton active={st === "absent"} tone="absent" onClick={() => mark(r.id, "absent")}><X size={15} />Absent</MarkButton>
-                      </div>
-                    </td>
-                  </tr>
+                  <li key={r.id}>
+                    <button
+                      onClick={() => toggle(r.id)}
+                      className={`flex w-full items-center gap-3 border-t border-[var(--color-border)] px-4 py-2.5 text-left text-sm first:border-t-0 ${present ? "bg-green-50" : "hover:bg-[var(--color-surface-2)]"}`}
+                    >
+                      <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${present ? "border-green-600 bg-green-600 text-white" : "border-[var(--color-border)]"}`}>
+                        {present && <Check size={13} />}
+                      </span>
+                      <span className={`flex-1 ${present ? "font-medium" : ""}`}>{r.firstName} {r.lastName}</span>
+                      <BeltBadge rank={r.rank} size="sm" />
+                    </button>
+                  </li>
                 );
               })}
-              {roster.length === 0 && !loading && (
-                <tr><td colSpan={3} className="p-10 text-center text-sm text-[var(--color-fg-muted)]">No eligible students for this class.</td></tr>
+              {visible.length === 0 && !loading && (
+                <li className="p-10 text-center text-sm text-[var(--color-fg-muted)]">
+                  {roster.length === 0 ? "No eligible students for this class." : "No students match your search."}
+                </li>
               )}
-            </tbody>
-          </table>
-        </div>
+            </ul>
+          </div>
+        </>
       )}
     </>
-  );
-}
-
-function MarkButton({ active, tone, onClick, children }: {
-  active: boolean; tone: "present" | "absent"; onClick: () => void; children: React.ReactNode;
-}) {
-  const activeCls = tone === "present"
-    ? "bg-green-600 text-white border-green-600"
-    : "bg-red-500 text-white border-red-500";
-  return (
-    <button onClick={onClick}
-      className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium ${active ? activeCls : "border-[var(--color-border)] text-[var(--color-fg-muted)] hover:bg-[var(--color-surface-2)]"}`}>
-      {children}
-    </button>
   );
 }

@@ -5,14 +5,33 @@
  * Lazy imports keep the Tauri runtime out of the Node/test import graph
  * (same pattern as db/client.ts).
  */
-export async function saveTextFile(defaultName: string, text: string): Promise<boolean> {
+export async function saveTextFile(
+  defaultName: string,
+  text: string,
+  kind: "csv" | "html" = "csv",
+): Promise<boolean> {
   const { save } = await import("@tauri-apps/plugin-dialog");
   const { invoke } = await import("@tauri-apps/api/core");
-  const path = await save({
-    defaultPath: defaultName,
-    filters: [{ name: "Comma-separated values", extensions: ["csv"] }],
-  });
+  const filter = kind === "html"
+    ? { name: "HTML (open & print)", extensions: ["html"] }
+    : { name: "Comma-separated values", extensions: ["csv"] };
+  const path = await save({ defaultPath: defaultName, filters: [filter] });
   if (!path) return false;
   await invoke("write_text_file", { path, contents: text });
+  return true;
+}
+
+/** Save raw bytes (e.g. a generated .xlsx) via the native Save dialog. */
+export async function saveBytesFile(
+  defaultName: string,
+  bytes: Uint8Array,
+  filterName: string,
+  ext: string,
+): Promise<boolean> {
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const { invoke } = await import("@tauri-apps/api/core");
+  const path = await save({ defaultPath: defaultName, filters: [{ name: filterName, extensions: [ext] }] });
+  if (!path) return false;
+  await invoke("write_bytes_file", { path, bytes: Array.from(bytes) });
   return true;
 }

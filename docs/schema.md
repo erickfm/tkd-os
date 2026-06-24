@@ -49,7 +49,8 @@ Core student profile. One row per student.
 | `belt_rank_id` | INTEGER | NOT NULL | — | FK → `belt_ranks.id`; current belt |
 | `belt_size` | VARCHAR(10) | NULL | — | Belt size (e.g. `'0'`, `'00'`, `'4'`); see [Belt Sizes](#belt-sizes) |
 | `join_date` | DATE | NOT NULL | today | Date student joined the dojang |
-| `is_starter_student` | BOOLEAN | NOT NULL | `FALSE` | Whether student is on or has been through a starter course |
+| `is_starter_student` | BOOLEAN | NOT NULL | `FALSE` | Whether student is/was on a trial (kept in sync with `trial_start_date`) |
+| `trial_start_date` | DATE | NULL | — | Start of the student's 6-week trial; trial end is derived (+42 days). NULL = not on a trial |
 | `notes` | TEXT | NULL | — | Free-form notes (medical info, goals, parent name, etc.) |
 | `is_active` | BOOLEAN | NOT NULL | `TRUE` | Soft-delete flag. For legacy imports, set from the MSS `Activity Level` (1 = active) — not the termination date |
 | `legacy_id` | INTEGER | NULL | — | Source MSS `Student ID` for imported students (lets legacy data re-sync exactly); NULL for app-created students |
@@ -331,6 +332,7 @@ The current belt-testing period. The app works against a single active cycle at 
 | `id` | INTEGER | NOT NULL | autoincrement | Primary key |
 | `start_date` | DATE | NOT NULL | — | First day of the testing cycle |
 | `end_date` | DATE | NOT NULL | — | Last day of the testing cycle |
+| `testing_date` | DATE | NULL | — | Day the testing happens; class counts use start→testing_date (or end if unset) |
 | `is_active` | BOOLEAN | NOT NULL | `TRUE` | Marks the current cycle |
 | `created_at` | TIMESTAMP | NOT NULL | now() | Record creation timestamp |
 | `updated_at` | TIMESTAMP | NOT NULL | now() | Last update timestamp |
@@ -364,6 +366,15 @@ Students registered to test in a given cycle (the "registered to test" list).
 
 ---
 
+## 12b. `inventory_sections` / `inventory_items`
+
+Equipment inventory, grouped into sections (migration 0008 seeds six: Sparring Gear, Uniforms, Shirts, Boards, Cub Belts, Belts).
+
+- **`inventory_sections`**: `id`, `name`, `sort_order`, `updated_at` (bumped whenever any of its items change — drives the per-section "last updated").
+- **`inventory_items`**: `id`, `section_id` → `inventory_sections.id`, `name` (product, e.g. Helmet / Board / Belt color), `size` (variant, nullable — e.g. `S`, `0000`, `Yellow Stripe`, `1`), `in_stock` (≥0), `to_order` (≥0), `sort_order`, `updated_at`.
+
+Items are user-editable (add/remove, edit counts). Each section exports to `.xlsx` (write-excel-file → `write_bytes_file` Tauri command → native Save dialog).
+
 ## 13. Enumerations & Lookup Values
 
 ### Track
@@ -393,6 +404,10 @@ Used in `attendance_sessions.class_type` and to drive attendance filtering logic
 | `jr-gbp` | Jr. Green, Blue & Purple | `regular` | `jr` | `jr-gbp` |
 | `jr-brb` | Jr. Brown, Red & Black | `regular` | `jr` | `jr-brb` |
 | `adult` | Adult | `regular` | `adult` | `jr-wy`, `jr-gbp`, `jr-brb` (all) |
+
+**Cross-class eligibility (students may attend more than one class):**
+- **`jr-wy`** also includes **Tiger Cub Red Stripe** students (they may attend either the Tiger or the Jr. W&Y class).
+- **`adult`** also includes **any active student aged 12+** (by `date_of_birth`), in addition to regular `adult`-age-group students.
 
 ### Class Groups
 

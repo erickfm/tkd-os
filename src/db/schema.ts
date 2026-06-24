@@ -85,6 +85,7 @@ export const students = sqliteTable(
     isStarterStudent: integer("is_starter_student", { mode: "boolean" })
       .notNull()
       .default(false),
+    trialStartDate: text("trial_start_date"),
     notes: text("notes"),
     isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
     legacyId: integer("legacy_id"),
@@ -302,6 +303,7 @@ export const testingCycles = sqliteTable("testing_cycles", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   startDate: text("start_date").notNull(),
   endDate: text("end_date").notNull(),
+  testingDate: text("testing_date"),
   isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -328,6 +330,32 @@ export const testingRegistration = sqliteTable(
   }),
 );
 
+export const inventorySections = sqliteTable("inventory_sections", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  sortOrder: integer("sort_order").notNull(),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const inventoryItems = sqliteTable(
+  "inventory_items",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    sectionId: integer("section_id")
+      .notNull()
+      .references(() => inventorySections.id),
+    name: text("name").notNull(),
+    size: text("size"),
+    inStock: integer("in_stock").notNull().default(0),
+    toOrder: integer("to_order").notNull().default(0),
+    sortOrder: integer("sort_order").notNull(),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (t) => ({
+    sectionIdx: index("inventory_items_section_idx").on(t.sectionId, t.sortOrder),
+  }),
+);
+
 export type BeltRank = typeof beltRanks.$inferSelect;
 export type Student = typeof students.$inferSelect;
 export type RankHistoryEntry = typeof rankHistory.$inferSelect;
@@ -340,3 +368,5 @@ export type StarterCourse = typeof starterCourses.$inferSelect;
 export type StarterCourseEnrollment = typeof starterCourseEnrollment.$inferSelect;
 export type TestingCycle = typeof testingCycles.$inferSelect;
 export type TestingRegistration = typeof testingRegistration.$inferSelect;
+export type InventorySection = typeof inventorySections.$inferSelect;
+export type InventoryItem = typeof inventoryItems.$inferSelect;

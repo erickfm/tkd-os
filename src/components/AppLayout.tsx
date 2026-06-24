@@ -9,7 +9,8 @@ const NAV = [
   { to: "/attendance", label: "Attendance" },
   { to: "/testing-cycle", label: "Testing Cycle" },
   { to: "/events", label: "Events" },
-  { to: "/starter-courses", label: "Starter Courses" },
+  { to: "/trials", label: "Trials" },
+  { to: "/inventory", label: "Inventory" },
   { to: "/settings", label: "Settings" },
 ];
 

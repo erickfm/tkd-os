@@ -2,18 +2,20 @@ import { useEffect, useMemo, useState } from "react";
 
 import { Drawer } from "@/components/Drawer";
 import { Button, Field, Select, TextInput, Textarea } from "@/components/ui";
-import { BELT_SIZES } from "@/db/enums";
+import { BELT_SIZES, CLASS_TYPE_LABELS } from "@/db/enums";
 import type { BeltRank } from "@/db/schema";
 import {
   createStudent,
   getProgress,
+  getStudentAttendance,
   setStudentActive,
   updateProgress,
   updateStudent,
+  type StudentAttendanceSummary,
   type StudentInput,
   type StudentRow,
 } from "@/db/repos";
-import { today } from "@/lib/format";
+import { prettyDate, today } from "@/lib/format";
 
 type ProgressState = {
   greenStripe: boolean;
@@ -37,7 +39,7 @@ function blank(): StudentInput {
     guardian1Name: null, guardian1Phone: null, guardian1Email: null,
     guardian2Name: null, guardian2Phone: null, guardian2Email: null,
     emergencyContact: null, track: "regular", ageGroup: "jr",
-    beltRankId: 0, beltSize: null, joinDate: today(), notes: null,
+    beltRankId: 0, beltSize: null, joinDate: today(), trialStartDate: null, notes: null,
   };
 }
 
@@ -63,7 +65,8 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
             emergencyContact: editing.emergencyContact,
             track: editing.track, ageGroup: editing.ageGroup,
             beltRankId: editing.beltRankId, beltSize: editing.beltSize,
-            joinDate: editing.joinDate, notes: editing.notes,
+            joinDate: editing.joinDate, trialStartDate: editing.trialStartDate,
+            notes: editing.notes,
           }
         : blank(),
     );
@@ -90,6 +93,12 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
     setProgress(next);
     await updateProgress(editing.id, { [k]: next[k] });
   }
+
+  const [attendance, setAttendance] = useState<StudentAttendanceSummary | null>(null);
+  useEffect(() => {
+    if (!open || !editing) { setAttendance(null); return; }
+    getStudentAttendance(editing.id).then(setAttendance);
+  }, [open, editing]);
 
   const ranksForTrack = useMemo(
     () => ranks.filter((r) => r.track === form.track),
@@ -207,9 +216,14 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
         </Field>
       </div>
 
-      <Field label="Join date">
-        <TextInput type="date" value={form.joinDate} onChange={(e) => set("joinDate", e.target.value)} />
-      </Field>
+      <div className="grid grid-cols-2 gap-x-3">
+        <Field label="Join date">
+          <TextInput type="date" value={form.joinDate} onChange={(e) => set("joinDate", e.target.value)} />
+        </Field>
+        <Field label="Trial start date" hint="Leave blank if not on a trial (6 weeks).">
+          <TextInput type="date" value={form.trialStartDate ?? ""} onChange={(e) => set("trialStartDate", e.target.value || null)} />
+        </Field>
+      </div>
 
       <div className="grid grid-cols-2 gap-x-3">
         <Field label="Phone"><TextInput value={form.phone ?? ""} onChange={(e) => set("phone", e.target.value || null)} /></Field>
@@ -257,6 +271,28 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
             <Toggle on={progress.permissionToTest} onClick={() => toggleProgress("permissionToTest")}>Permission to test</Toggle>
           </div>
           <p className="mt-2 text-xs text-[var(--color-fg-muted)]">Resets automatically when the student is promoted.</p>
+        </div>
+      )}
+
+      {editing && attendance && (
+        <div className="mt-3 rounded-md border border-[var(--color-border)] p-3">
+          <div className="mb-2 text-sm font-medium">Attendance</div>
+          <div className="mb-3 flex gap-6 text-sm">
+            <div><span className="text-2xl font-semibold">{attendance.total}</span> <span className="text-[var(--color-fg-muted)]">classes total</span></div>
+            <div><span className="text-2xl font-semibold">{attendance.sinceLastPromotion}</span> <span className="text-[var(--color-fg-muted)]">since last promotion</span></div>
+          </div>
+          {attendance.recent.length === 0 ? (
+            <p className="text-xs text-[var(--color-fg-muted)]">No classes recorded yet.</p>
+          ) : (
+            <ul className="max-h-48 overflow-auto text-sm">
+              {attendance.recent.map((c, i) => (
+                <li key={i} className="flex justify-between border-t border-[var(--color-border)] py-1 first:border-t-0">
+                  <span>{prettyDate(c.date)}</span>
+                  <span className="text-[var(--color-fg-muted)]">{CLASS_TYPE_LABELS[c.classType as keyof typeof CLASS_TYPE_LABELS] ?? c.classType}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
     </Drawer>

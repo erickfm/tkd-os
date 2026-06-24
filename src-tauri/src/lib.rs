@@ -6,6 +6,12 @@ fn write_text_file(path: String, contents: String) -> Result<(), String> {
     std::fs::write(&path, contents).map_err(|e| e.to_string())
 }
 
+/// Write raw bytes (e.g. a generated .xlsx) to a user-chosen path.
+#[tauri::command]
+fn write_bytes_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let migrations = vec![
@@ -39,6 +45,24 @@ pub fn run() {
             sql: include_str!("../migrations/0005_legacy_id.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 6,
+            description: "testing_date",
+            sql: include_str!("../migrations/0006_testing_date.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 7,
+            description: "trial_start",
+            sql: include_str!("../migrations/0007_trial_start.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 8,
+            description: "inventory",
+            sql: include_str!("../migrations/0008_inventory.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -49,7 +73,7 @@ pub fn run() {
                 .add_migrations("sqlite:tkdos.db", migrations)
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![write_text_file])
+        .invoke_handler(tauri::generate_handler![write_text_file, write_bytes_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

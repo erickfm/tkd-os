@@ -6,7 +6,8 @@ import { StudentsPage } from "@/pages/Students";
 import { AttendancePage } from "@/pages/Attendance";
 import { TestingCyclePage } from "@/pages/TestingCycle";
 import { EventsPage } from "@/pages/Events";
-import { StarterCoursesPage } from "@/pages/StarterCourses";
+import { TrialsPage } from "@/pages/Trials";
+import { InventoryPage } from "@/pages/Inventory";
 import { SettingsPage } from "@/pages/Settings";
 
 export const router = createBrowserRouter([
@@ -20,7 +21,8 @@ export const router = createBrowserRouter([
       { path: "attendance", element: <AttendancePage /> },
       { path: "testing-cycle", element: <TestingCyclePage /> },
       { path: "events", element: <EventsPage /> },
-      { path: "starter-courses", element: <StarterCoursesPage /> },
+      { path: "trials", element: <TrialsPage /> },
+      { path: "inventory", element: <InventoryPage /> },
       { path: "settings", element: <SettingsPage /> },
     ],
   },

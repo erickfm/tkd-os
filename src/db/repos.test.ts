@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 
 import { __setTestDb, createDb } from "./client";
 import {
+  addInventoryItem,
   addToRoster,
+  buildBeltLabelsHtml,
   buildEventRosterCsv,
   buildTestingCycleCsv,
   createEvent,
@@ -14,15 +16,24 @@ import {
   getCurrentCycle,
   getCycleCandidates,
   getCycleRegistrations,
+  getDashboardAlerts,
   getDashboardStats,
+  deleteInventoryItem,
   getOrCreateSession,
+  getStudentAttendance,
+  listInventory,
+  listTrialStudents,
+  updateInventoryItem,
+  setTrial,
   listBeltRanks,
   listStudents,
+  minClassesToTest,
   promoteCycle,
   registerToTest,
   setAttendance,
+  studentsForClass,
   unregisterFromTest,
-  updateCycleDates,
+  updateCycle,
   updateProgress,
   type StudentInput,
 } from "./repos";
@@ -44,6 +55,9 @@ beforeAll(() => {
   sqlite.exec(readFileSync(join(migrationsDir, "0003_guardians.sql"), "utf8"));
   sqlite.exec(readFileSync(join(migrationsDir, "0004_testing_cycle.sql"), "utf8"));
   sqlite.exec(readFileSync(join(migrationsDir, "0005_legacy_id.sql"), "utf8"));
+  sqlite.exec(readFileSync(join(migrationsDir, "0006_testing_date.sql"), "utf8"));
+  sqlite.exec(readFileSync(join(migrationsDir, "0007_trial_start.sql"), "utf8"));
+  sqlite.exec(readFileSync(join(migrationsDir, "0008_inventory.sql"), "utf8"));
 
   const blackId = (sqlite
     .prepare("SELECT id FROM belt_ranks WHERE track='regular' AND degree IS NOT NULL ORDER BY sort_order LIMIT 1")
@@ -109,7 +123,7 @@ function makeInput(over: Partial<StudentInput>): StudentInput {
     guardian1Name: null, guardian1Phone: null, guardian1Email: null,
     guardian2Name: null, guardian2Phone: null, guardian2Email: null,
     emergencyContact: null, track: "regular", ageGroup: "jr",
-    beltRankId: 0, beltSize: null, joinDate: "2024-01-01", notes: null,
+    beltRankId: 0, beltSize: null, joinDate: "2024-01-01", trialStartDate: null, notes: null,
     ...over,
   };
 }
@@ -141,7 +155,7 @@ describe("testing cycle", () => {
   it("counts only in-range attendance and exposes stripe/PTT flags", async () => {
     const rank = await lowestRegularColorRank();
     const cycle = await getCurrentCycle();
-    await updateCycleDates(cycle.id, "2024-01-01", "2024-12-31");
+    await updateCycle(cycle.id, "2024-01-01", "2024-12-31", null);
 
     const id = await createStudent(makeInput({ firstName: "Cy", lastName: "Cle", beltRankId: rank.id }));
     await updateProgress(id, { blueStripe: true, permissionToTest: true });
@@ -161,6 +175,31 @@ describe("testing cycle", () => {
     expect(reg.testingFor).not.toBeNull();
 
     await unregisterFromTest(cycle.id, id);
+  });
+
+  it("computes min classes by rank and flags eligibility from cycle attendance", async () => {
+    const ranks = await listBeltRanks();
+    const cub = ranks.find((r) => r.track === "tiger")!;
+    const white = ranks.find((r) => r.track === "regular" && r.classGroup === "jr-wy")!;
+    const brown = ranks.find((r) => r.track === "regular" && r.classGroup === "jr-brb" && r.degree == null)!;
+    expect(minClassesToTest(cub)).toBe(6);
+    expect(minClassesToTest(white)).toBe(10);
+    expect(minClassesToTest(brown)).toBe(12);
+
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-06-01", "2025-08-01", "2025-07-15");
+    const id = await createStudent(makeInput({ firstName: "Elig", lastName: "Ible", beltRankId: white.id }));
+    // 10 present classes inside the window -> meets the white-belt minimum of 10.
+    for (let i = 0; i < 10; i++) {
+      const s = await getOrCreateSession(`2025-06-${String(i + 2).padStart(2, "0")}`, "adult");
+      await setAttendance(s, id, "present");
+    }
+    await registerToTest(cycle.id, id);
+    const row = (await getCycleRegistrations(cycle.id)).find((r) => r.id === id)!;
+    expect(row.minClasses).toBe(10);
+    expect(row.attendanceThisCycle).toBe(10);
+    expect(row.meetsMinimum).toBe(true);
+    await promoteCycle(cycle.id);
   });
 
   it("promotes every registered student one rank and clears the list", async () => {
@@ -185,17 +224,29 @@ describe("testing cycle", () => {
 
     const csv = await buildTestingCycleCsv(cycle.id);
     const [header, ...rows] = csv.split("\r\n");
-    expect(header).toBe(["Name", "Age", "Current Belt", "Testing For"].join(","));
+    expect(header).toBe(["Name", "Age", "Current Belt", "Testing For", "Belt Size", "Classes", "Min", "Eligible"].join(","));
     expect(rows.some((line) => line.startsWith("Ex Port,"))).toBe(true);
     expect(rows.find((line) => line.startsWith("Ex Port,"))).toContain(rank.name);
 
     await promoteCycle(cycle.id); // clears registrations for any later runs
   });
 
+  it("builds Avery 5160 belt-label HTML for registered students", async () => {
+    const rank = await lowestRegularColorRank();
+    const cycle = await getCurrentCycle();
+    const id = await createStudent(makeInput({ firstName: "Lab", lastName: "Eller", beltRankId: rank.id, beltSize: "3" }));
+    await registerToTest(cycle.id, id);
+    const html = await buildBeltLabelsHtml(cycle.id);
+    expect(html).toContain("Lab Eller");
+    expect(html).toContain("Size: 3");
+    expect(html).toContain("2.625in"); // Avery 5160 label width
+    await promoteCycle(cycle.id);
+  });
+
   it("lists all active students with cycle attendance and a registered flag", async () => {
     const rank = await lowestRegularColorRank();
     const cycle = await getCurrentCycle();
-    await updateCycleDates(cycle.id, "2025-01-01", "2025-12-31");
+    await updateCycle(cycle.id, "2025-01-01", "2025-12-31", null);
     const id = await createStudent(makeInput({ firstName: "Cand", lastName: "Idate", beltRankId: rank.id }));
 
     const inSession = await getOrCreateSession("2025-05-05", "adult");
@@ -215,6 +266,123 @@ describe("testing cycle", () => {
   });
 });
 
+describe("student attendance history", () => {
+  it("totals only present classes and lists them most-recent first", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "Atten", lastName: "Dance", beltRankId: rank.id }));
+    const s1 = await getOrCreateSession("2025-02-01", "adult");
+    const s2 = await getOrCreateSession("2025-02-08", "adult");
+    const s3 = await getOrCreateSession("2025-02-15", "adult");
+    await setAttendance(s1, id, "present");
+    await setAttendance(s2, id, "present");
+    await setAttendance(s3, id, "absent"); // must not count
+
+    const a = await getStudentAttendance(id);
+    expect(a.total).toBe(2);
+    expect(a.recent.map((r) => r.date)).toEqual(["2025-02-08", "2025-02-01"]);
+  });
+});
+
+function isoDaysAgo(n: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+
+describe("trials + dashboard alerts", () => {
+  it("derives trial end (+6 weeks) and flags trials ending within a week", async () => {
+    const rank = await lowestRegularColorRank();
+    const soonId = await createStudent(makeInput({ firstName: "Soon", lastName: "Ending", beltRankId: rank.id }));
+    const farId = await createStudent(makeInput({ firstName: "Far", lastName: "Out", beltRankId: rank.id }));
+    await setTrial(soonId, isoDaysAgo(40)); // ends in ~2 days
+    await setTrial(farId, isoDaysAgo(1)); // ends in ~41 days
+
+    const trials = await listTrialStudents();
+    const soon = trials.find((t) => t.id === soonId)!;
+    expect(soon.trialEnd).toBe((() => { const d = new Date(isoDaysAgo(40) + "T00:00:00"); d.setDate(d.getDate() + 42); return d.toISOString().slice(0, 10); })());
+    expect(soon.daysLeft).toBeLessThanOrEqual(7);
+
+    const alerts = await getDashboardAlerts();
+    expect(alerts.trialsEndingSoon.some((a) => a.id === soonId)).toBe(true);
+    expect(alerts.trialsEndingSoon.some((a) => a.id === farId)).toBe(false);
+
+    await setTrial(soonId, null);
+    await setTrial(farId, null);
+    expect((await listTrialStudents()).some((t) => t.id === soonId)).toBe(false);
+  });
+
+  it("flags active students absent >14 days who attended before, not the recent or never-attended", async () => {
+    const rank = await lowestRegularColorRank();
+    const lapsed = await createStudent(makeInput({ firstName: "Lap", lastName: "Sed", beltRankId: rank.id }));
+    const recent = await createStudent(makeInput({ firstName: "Reg", lastName: "Ular", beltRankId: rank.id }));
+    const sOld = await getOrCreateSession(isoDaysAgo(30), "adult");
+    await setAttendance(sOld, lapsed, "present");
+    const sNew = await getOrCreateSession(isoDaysAgo(3), "adult");
+    await setAttendance(sNew, recent, "present");
+
+    const { recurringAbsences } = await getDashboardAlerts();
+    expect(recurringAbsences.some((a) => a.id === lapsed)).toBe(true);
+    expect(recurringAbsences.some((a) => a.id === recent)).toBe(false);
+  });
+});
+
+describe("inventory", () => {
+  it("seeds the six sections with their items", async () => {
+    const inv = await listInventory();
+    expect(inv.map((s) => s.section.name)).toEqual([
+      "Sparring Gear", "Uniforms", "Shirts", "Boards", "Cub Belts", "Belts",
+    ]);
+    const belts = inv.find((s) => s.section.name === "Belts")!;
+    expect(belts.items.length).toBe(91); // 13 colors x sizes 1-7
+    const sparring = inv.find((s) => s.section.name === "Sparring Gear")!;
+    expect(sparring.items.some((i) => i.name === "Helmet" && i.size === "S")).toBe(true);
+    expect(sparring.items.some((i) => i.name === "Cases" && i.size === null)).toBe(true);
+  });
+
+  it("updates counts (and bumps the section timestamp), adds, and removes items", async () => {
+    const inv = await listInventory();
+    const boards = inv.find((s) => s.section.name === "Boards")!;
+    const item = boards.items[0];
+
+    await updateInventoryItem(item.id, { inStock: 5, toOrder: 2 });
+    let after = (await listInventory()).find((s) => s.section.name === "Boards")!;
+    const updated = after.items.find((i) => i.id === item.id)!;
+    expect(updated.inStock).toBe(5);
+    expect(updated.toOrder).toBe(2);
+    expect(after.section.updatedAt >= boards.section.updatedAt).toBe(true);
+
+    const newId = await addInventoryItem(boards.section.id, "Brick", null);
+    after = (await listInventory()).find((s) => s.section.name === "Boards")!;
+    expect(after.items.some((i) => i.id === newId && i.name === "Brick")).toBe(true);
+
+    await deleteInventoryItem(newId);
+    after = (await listInventory()).find((s) => s.section.name === "Boards")!;
+    expect(after.items.some((i) => i.id === newId)).toBe(false);
+  });
+});
+
+describe("attendance class eligibility", () => {
+  it("adult class includes any active student aged 12+ (by DOB), not younger ones", async () => {
+    const rank = await lowestRegularColorRank();
+    const teen = await createStudent(makeInput({ firstName: "Teen", lastName: "Ager", beltRankId: rank.id, ageGroup: "jr", dateOfBirth: "2010-01-01" }));
+    const kid = await createStudent(makeInput({ firstName: "Lil", lastName: "Kid", beltRankId: rank.id, ageGroup: "jr", dateOfBirth: "2020-01-01" }));
+    const adultClass = await studentsForClass("adult");
+    expect(adultClass.some((s) => s.id === teen)).toBe(true);
+    expect(adultClass.some((s) => s.id === kid)).toBe(false);
+  });
+
+  it("Jr. White & Yellow class includes Tiger Cub Red Stripes", async () => {
+    const ranks = await listBeltRanks();
+    const redStripe = ranks.find((r) => r.name === "Tiger Cub Red Stripe")!;
+    const tigerWhite = ranks.find((r) => r.track === "tiger" && r.sortOrder === 0)!;
+    const rs = await createStudent(makeInput({ firstName: "Red", lastName: "Stripe", track: "tiger", beltRankId: redStripe.id }));
+    const tw = await createStudent(makeInput({ firstName: "Tiny", lastName: "White", track: "tiger", beltRankId: tigerWhite.id }));
+    const jrwy = await studentsForClass("jr-wy");
+    expect(jrwy.some((s) => s.id === rs)).toBe(true); // red stripe attends Jr. W&Y too
+    expect(jrwy.some((s) => s.id === tw)).toBe(false); // a plain tiger cub does not
+  });
+});
+
 describe("event roster export", () => {
   it("exports name, age, track, and belt as CSV", async () => {
     const rank = await lowestRegularColorRank();
@@ -231,5 +399,20 @@ describe("event roster export", () => {
     const line = rows.find((l) => l.startsWith("Seminar Goer,"))!;
     expect(line).toContain(rank.name);
     expect(line).toContain("Jr./Adult");
+  });
+
+  it("orders exports Tiger Cubs, then Juniors, then Adults", async () => {
+    const ranks = await listBeltRanks();
+    const tigerWhite = ranks.find((r) => r.track === "tiger" && r.sortOrder === 0)!;
+    const jrWhite = ranks.find((r) => r.track === "regular" && r.sortOrder === 0)!;
+    const tiger = await createStudent(makeInput({ firstName: "Aaa", lastName: "Tigerkid", track: "tiger", beltRankId: tigerWhite.id }));
+    const jr = await createStudent(makeInput({ firstName: "Bbb", lastName: "Juniorkid", track: "regular", ageGroup: "jr", beltRankId: jrWhite.id }));
+    const adult = await createStudent(makeInput({ firstName: "Ccc", lastName: "Adultone", track: "regular", ageGroup: "adult", beltRankId: jrWhite.id }));
+    const eventId = await createEvent({ name: "Order Test", eventDate: "2025-04-01", eventTime: null, eventType: "Demo", location: null, notes: null });
+    for (const id of [adult, jr, tiger]) await addToRoster(eventId, id); // added out of group order
+
+    const order = (await buildEventRosterCsv(eventId)).split("\r\n").slice(1).map((r) => r.split(",")[0]);
+    expect(order.indexOf("Aaa Tigerkid")).toBeLessThan(order.indexOf("Bbb Juniorkid"));
+    expect(order.indexOf("Bbb Juniorkid")).toBeLessThan(order.indexOf("Ccc Adultone"));
   });
 });
