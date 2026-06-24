@@ -7,6 +7,7 @@ import { AttendancePage } from "@/pages/Attendance";
 import { TestingCyclePage } from "@/pages/TestingCycle";
 import { EventsPage } from "@/pages/Events";
 import { TrialsPage } from "@/pages/Trials";
+import { InventoryPage } from "@/pages/Inventory";
 import { SettingsPage } from "@/pages/Settings";
 
 export const router = createBrowserRouter([
@@ -21,6 +22,7 @@ export const router = createBrowserRouter([
       { path: "testing-cycle", element: <TestingCyclePage /> },
       { path: "events", element: <EventsPage /> },
       { path: "trials", element: <TrialsPage /> },
+      { path: "inventory", element: <InventoryPage /> },
       { path: "settings", element: <SettingsPage /> },
     ],
   },

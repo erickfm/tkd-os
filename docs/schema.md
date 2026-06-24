@@ -366,6 +366,15 @@ Students registered to test in a given cycle (the "registered to test" list).
 
 ---
 
+## 12b. `inventory_sections` / `inventory_items`
+
+Equipment inventory, grouped into sections (migration 0008 seeds six: Sparring Gear, Uniforms, Shirts, Boards, Cub Belts, Belts).
+
+- **`inventory_sections`**: `id`, `name`, `sort_order`, `updated_at` (bumped whenever any of its items change — drives the per-section "last updated").
+- **`inventory_items`**: `id`, `section_id` → `inventory_sections.id`, `name` (product, e.g. Helmet / Board / Belt color), `size` (variant, nullable — e.g. `S`, `0000`, `Yellow Stripe`, `1`), `in_stock` (≥0), `to_order` (≥0), `sort_order`, `updated_at`.
+
+Items are user-editable (add/remove, edit counts). Each section exports to `.xlsx` (write-excel-file → `write_bytes_file` Tauri command → native Save dialog).
+
 ## 13. Enumerations & Lookup Values
 
 ### Track

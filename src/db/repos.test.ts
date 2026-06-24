@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { __setTestDb, createDb } from "./client";
 import {
+  addInventoryItem,
   addToRoster,
   buildBeltLabelsHtml,
   buildEventRosterCsv,
@@ -17,9 +18,12 @@ import {
   getCycleRegistrations,
   getDashboardAlerts,
   getDashboardStats,
+  deleteInventoryItem,
   getOrCreateSession,
   getStudentAttendance,
+  listInventory,
   listTrialStudents,
+  updateInventoryItem,
   setTrial,
   listBeltRanks,
   listStudents,
@@ -53,6 +57,7 @@ beforeAll(() => {
   sqlite.exec(readFileSync(join(migrationsDir, "0005_legacy_id.sql"), "utf8"));
   sqlite.exec(readFileSync(join(migrationsDir, "0006_testing_date.sql"), "utf8"));
   sqlite.exec(readFileSync(join(migrationsDir, "0007_trial_start.sql"), "utf8"));
+  sqlite.exec(readFileSync(join(migrationsDir, "0008_inventory.sql"), "utf8"));
 
   const blackId = (sqlite
     .prepare("SELECT id FROM belt_ranks WHERE track='regular' AND degree IS NOT NULL ORDER BY sort_order LIMIT 1")
@@ -318,6 +323,41 @@ describe("trials + dashboard alerts", () => {
     const { recurringAbsences } = await getDashboardAlerts();
     expect(recurringAbsences.some((a) => a.id === lapsed)).toBe(true);
     expect(recurringAbsences.some((a) => a.id === recent)).toBe(false);
+  });
+});
+
+describe("inventory", () => {
+  it("seeds the six sections with their items", async () => {
+    const inv = await listInventory();
+    expect(inv.map((s) => s.section.name)).toEqual([
+      "Sparring Gear", "Uniforms", "Shirts", "Boards", "Cub Belts", "Belts",
+    ]);
+    const belts = inv.find((s) => s.section.name === "Belts")!;
+    expect(belts.items.length).toBe(91); // 13 colors x sizes 1-7
+    const sparring = inv.find((s) => s.section.name === "Sparring Gear")!;
+    expect(sparring.items.some((i) => i.name === "Helmet" && i.size === "S")).toBe(true);
+    expect(sparring.items.some((i) => i.name === "Cases" && i.size === null)).toBe(true);
+  });
+
+  it("updates counts (and bumps the section timestamp), adds, and removes items", async () => {
+    const inv = await listInventory();
+    const boards = inv.find((s) => s.section.name === "Boards")!;
+    const item = boards.items[0];
+
+    await updateInventoryItem(item.id, { inStock: 5, toOrder: 2 });
+    let after = (await listInventory()).find((s) => s.section.name === "Boards")!;
+    const updated = after.items.find((i) => i.id === item.id)!;
+    expect(updated.inStock).toBe(5);
+    expect(updated.toOrder).toBe(2);
+    expect(after.section.updatedAt >= boards.section.updatedAt).toBe(true);
+
+    const newId = await addInventoryItem(boards.section.id, "Brick", null);
+    after = (await listInventory()).find((s) => s.section.name === "Boards")!;
+    expect(after.items.some((i) => i.id === newId && i.name === "Brick")).toBe(true);
+
+    await deleteInventoryItem(newId);
+    after = (await listInventory()).find((s) => s.section.name === "Boards")!;
+    expect(after.items.some((i) => i.id === newId)).toBe(false);
   });
 });
 

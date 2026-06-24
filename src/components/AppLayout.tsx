@@ -10,6 +10,7 @@ const NAV = [
   { to: "/testing-cycle", label: "Testing Cycle" },
   { to: "/events", label: "Events" },
   { to: "/trials", label: "Trials" },
+  { to: "/inventory", label: "Inventory" },
   { to: "/settings", label: "Settings" },
 ];
 

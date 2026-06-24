@@ -7,6 +7,8 @@ import {
   beltRanks,
   eventRoster,
   events,
+  inventoryItems,
+  inventorySections,
   rankHistory,
   starterCourseEnrollment,
   starterCourses,
@@ -15,7 +17,7 @@ import {
   testingCycles,
   testingRegistration,
 } from "./schema";
-import type { BeltRank, Student, TestingCycle } from "./schema";
+import type { BeltRank, InventoryItem, InventorySection, Student, TestingCycle } from "./schema";
 import { ageFromDob, today } from "@/lib/format";
 
 // ----------------------------------------------------------------------------
@@ -1044,4 +1046,77 @@ export async function unenrollFromCourse(courseId: number, studentId: number): P
         eq(starterCourseEnrollment.studentId, studentId),
       ),
     );
+}
+
+// ----------------------------------------------------------------------------
+// Inventory
+// ----------------------------------------------------------------------------
+
+export interface InventorySectionWithItems {
+  section: InventorySection;
+  items: InventoryItem[];
+}
+
+export async function listInventory(): Promise<InventorySectionWithItems[]> {
+  const db = await getDb();
+  const sections = await db
+    .select()
+    .from(inventorySections)
+    .orderBy(asc(inventorySections.sortOrder));
+  const items = await db
+    .select()
+    .from(inventoryItems)
+    .orderBy(asc(inventoryItems.sectionId), asc(inventoryItems.sortOrder));
+  return sections.map((section) => ({
+    section,
+    items: items.filter((i) => i.sectionId === section.id),
+  }));
+}
+
+async function touchSection(sectionId: number): Promise<void> {
+  const db = await getDb();
+  await db
+    .update(inventorySections)
+    .set({ updatedAt: sql`CURRENT_TIMESTAMP` })
+    .where(eq(inventorySections.id, sectionId));
+}
+
+export async function updateInventoryItem(
+  itemId: number,
+  patch: Partial<{ name: string; size: string | null; inStock: number; toOrder: number }>,
+): Promise<void> {
+  const db = await getDb();
+  const [item] = await db.select().from(inventoryItems).where(eq(inventoryItems.id, itemId));
+  if (!item) return;
+  await db
+    .update(inventoryItems)
+    .set({ ...patch, updatedAt: sql`CURRENT_TIMESTAMP` })
+    .where(eq(inventoryItems.id, itemId));
+  await touchSection(item.sectionId);
+}
+
+export async function addInventoryItem(
+  sectionId: number,
+  name: string,
+  size: string | null,
+): Promise<number> {
+  const db = await getDb();
+  const [max] = await db
+    .select({ m: sql<number>`coalesce(max(${inventoryItems.sortOrder}), -1)` })
+    .from(inventoryItems)
+    .where(eq(inventoryItems.sectionId, sectionId));
+  const [row] = await db
+    .insert(inventoryItems)
+    .values({ sectionId, name, size, sortOrder: Number(max?.m ?? -1) + 1 })
+    .returning({ id: inventoryItems.id });
+  await touchSection(sectionId);
+  return row.id;
+}
+
+export async function deleteInventoryItem(itemId: number): Promise<void> {
+  const db = await getDb();
+  const [item] = await db.select().from(inventoryItems).where(eq(inventoryItems.id, itemId));
+  if (!item) return;
+  await db.delete(inventoryItems).where(eq(inventoryItems.id, itemId));
+  await touchSection(item.sectionId);
 }

@@ -20,3 +20,18 @@ export async function saveTextFile(
   await invoke("write_text_file", { path, contents: text });
   return true;
 }
+
+/** Save raw bytes (e.g. a generated .xlsx) via the native Save dialog. */
+export async function saveBytesFile(
+  defaultName: string,
+  bytes: Uint8Array,
+  filterName: string,
+  ext: string,
+): Promise<boolean> {
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const { invoke } = await import("@tauri-apps/api/core");
+  const path = await save({ defaultPath: defaultName, filters: [{ name: filterName, extensions: [ext] }] });
+  if (!path) return false;
+  await invoke("write_bytes_file", { path, bytes: Array.from(bytes) });
+  return true;
+}
