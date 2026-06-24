@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { Award, Download, Trash2, UserPlus } from "lucide-react";
+import { Award, Download, Printer, Trash2, UserPlus } from "lucide-react";
 
 import { PageHeader } from "@/components/PageHeader";
 import { BeltBadge } from "@/components/BeltBadge";
 import { Button, EmptyState, TextInput } from "@/components/ui";
 import {
+  buildBeltLabelsHtml,
   buildTestingCycleCsv,
   getCurrentCycle,
   getCycleCandidates,
@@ -96,6 +97,13 @@ export function TestingCyclePage() {
     setExportMsg(saved ? "Testing list saved." : "Export canceled.");
   }
 
+  async function printLabels() {
+    if (!cycle) return;
+    const html = await buildBeltLabelsHtml(cycle.id);
+    const saved = await saveTextFile(`belt_labels_${cycle.startDate}.html`, html, "html");
+    setExportMsg(saved ? "Belt labels saved — open the file and print on Avery 5160 at 100% (no scaling)." : "Print canceled.");
+  }
+
   const visibleCandidates = useMemo(() => {
     const q = filter.trim().toLowerCase();
     if (q === "") return candidates;
@@ -109,6 +117,7 @@ export function TestingCyclePage() {
         subtitle={cycle ? `${prettyDate(cycle.startDate)} – ${prettyDate(cycle.endDate)} · ${roster.length} registered to test` : "Loading…"}
         actions={
           <>
+            <Button variant="secondary" onClick={printLabels} disabled={roster.length === 0}><Printer size={16} />Belt labels</Button>
             <Button variant="secondary" onClick={exportTsv} disabled={roster.length === 0}><Download size={16} />Export</Button>
             <Button variant="primary" onClick={promote} disabled={busy || roster.length === 0}><Award size={16} />{busy ? "Promoting…" : "Promote all"}</Button>
           </>

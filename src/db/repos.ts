@@ -655,6 +655,53 @@ export async function promoteCycle(cycleId: number): Promise<PromotionResult[]> 
   return results;
 }
 
+/**
+ * Print-ready HTML of belt labels for a cycle's registered students, laid out
+ * for Avery 5160 address labels (US Letter, 3 cols × 10 rows, 2.625" × 1").
+ * Each label: student name, the belt they're testing for, and belt size.
+ */
+export async function buildBeltLabelsHtml(cycleId: number): Promise<string> {
+  const roster = await getCycleRegistrations(cycleId);
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const label = (s: TestingRow) => `
+      <div class="label">
+        <div class="name">${esc(`${s.firstName} ${s.lastName}`)}</div>
+        <div class="belt">${esc(s.testingFor ?? s.rank.name)}</div>
+        <div class="size">Size: ${esc(s.beltSize ?? "—")}</div>
+      </div>`;
+  const pages: TestingRow[][] = [];
+  for (let i = 0; i < roster.length; i += 30) pages.push(roster.slice(i, i + 30));
+  const sheets = (pages.length ? pages : [[]]).map((pg) => `<div class="sheet">${pg.map(label).join("")}</div>`).join("");
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>Belt labels</title>
+<style>
+  @page { size: letter; margin: 0; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  .sheet {
+    width: 8.5in; height: 11in; padding: 0.5in 0.1875in;
+    display: grid; grid-template-columns: repeat(3, 2.625in); grid-auto-rows: 1in;
+    column-gap: 0.125in; row-gap: 0;
+    page-break-after: always;
+  }
+  .sheet:last-child { page-break-after: auto; }
+  .label {
+    width: 2.625in; height: 1in; padding: 0.1in 0.18in; overflow: hidden;
+    display: flex; flex-direction: column; justify-content: center;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+  .name { font-weight: 700; font-size: 12pt; line-height: 1.15; }
+  .belt { font-size: 9.5pt; }
+  .size { font-size: 9pt; color: #333; }
+  @media screen {
+    body { background: #e5e5e5; }
+    .sheet { background: #fff; margin: 12px auto; box-shadow: 0 0 6px rgba(0,0,0,.25); }
+    .label { outline: 1px dashed #ccc; }
+  }
+</style></head>
+<body>${sheets}</body></html>`;
+}
+
 /** CSV export of the testing list: name, age, belt, testing-for, size, classes. */
 export async function buildTestingCycleCsv(cycleId: number): Promise<string> {
   const roster = await getCycleRegistrations(cycleId);

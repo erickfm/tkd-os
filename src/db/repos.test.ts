@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { __setTestDb, createDb } from "./client";
 import {
   addToRoster,
+  buildBeltLabelsHtml,
   buildEventRosterCsv,
   buildTestingCycleCsv,
   createEvent,
@@ -222,6 +223,18 @@ describe("testing cycle", () => {
     expect(rows.find((line) => line.startsWith("Ex Port,"))).toContain(rank.name);
 
     await promoteCycle(cycle.id); // clears registrations for any later runs
+  });
+
+  it("builds Avery 5160 belt-label HTML for registered students", async () => {
+    const rank = await lowestRegularColorRank();
+    const cycle = await getCurrentCycle();
+    const id = await createStudent(makeInput({ firstName: "Lab", lastName: "Eller", beltRankId: rank.id, beltSize: "3" }));
+    await registerToTest(cycle.id, id);
+    const html = await buildBeltLabelsHtml(cycle.id);
+    expect(html).toContain("Lab Eller");
+    expect(html).toContain("Size: 3");
+    expect(html).toContain("2.625in"); // Avery 5160 label width
+    await promoteCycle(cycle.id);
   });
 
   it("lists all active students with cycle attendance and a registered flag", async () => {
