@@ -7,8 +7,10 @@ import { fileURLToPath } from "node:url";
 import { __setTestDb, createDb } from "./client";
 import {
   addInventoryItem,
+  addInventoryItems,
   addToRoster,
   buildBeltLabelsHtml,
+  buildCertificateRows,
   buildEventRosterCsv,
   buildTestingCycleCsv,
   createEvent,
@@ -18,15 +20,18 @@ import {
   getCycleRegistrations,
   getDashboardAlerts,
   getDashboardStats,
+  getUpcomingAgenda,
   deleteInventoryItem,
   getOrCreateSession,
   getStudentAttendance,
   listInventory,
   listTrialStudents,
   updateInventoryItem,
+  setStudentActive,
   setTrial,
   listBeltRanks,
   listStudents,
+  listStudentsWithProgress,
   minClassesToTest,
   promoteCycle,
   registerToTest,
@@ -359,6 +364,23 @@ describe("inventory", () => {
     after = (await listInventory()).find((s) => s.section.name === "Boards")!;
     expect(after.items.some((i) => i.id === newId)).toBe(false);
   });
+
+  it("adds a multi-size item as one row per size", async () => {
+    const belts = (await listInventory()).find((s) => s.section.name === "Belts")!;
+    const ids = await addInventoryItems(belts.section.id, "Black", ["1", "2", "3", "4", "5", "6", "7"]);
+    expect(ids.length).toBe(7);
+    const after = (await listInventory()).find((s) => s.section.name === "Belts")!;
+    const black = after.items.filter((i) => i.name === "Black");
+    expect(black.map((i) => i.size)).toEqual(["1", "2", "3", "4", "5", "6", "7"]);
+  });
+
+  it("adds a single null-size row when no sizes are given", async () => {
+    const boards = (await listInventory()).find((s) => s.section.name === "Boards")!;
+    const ids = await addInventoryItems(boards.section.id, "Cinderblock", []);
+    expect(ids.length).toBe(1);
+    const after = (await listInventory()).find((s) => s.section.name === "Boards")!;
+    expect(after.items.some((i) => i.name === "Cinderblock" && i.size === null)).toBe(true);
+  });
 });
 
 describe("attendance class eligibility", () => {
@@ -371,15 +393,94 @@ describe("attendance class eligibility", () => {
     expect(adultClass.some((s) => s.id === kid)).toBe(false);
   });
 
-  it("Jr. White & Yellow class includes Tiger Cub Red Stripes", async () => {
+  it("Jr. White & Yellow class includes Red Stripes (any age) and Tiger Cubs aged 6+, not younger ones", async () => {
     const ranks = await listBeltRanks();
     const redStripe = ranks.find((r) => r.name === "Tiger Cub Red Stripe")!;
     const tigerWhite = ranks.find((r) => r.track === "tiger" && r.sortOrder === 0)!;
-    const rs = await createStudent(makeInput({ firstName: "Red", lastName: "Stripe", track: "tiger", beltRankId: redStripe.id }));
-    const tw = await createStudent(makeInput({ firstName: "Tiny", lastName: "White", track: "tiger", beltRankId: tigerWhite.id }));
+    // Red Stripe who is still very young — included regardless of age.
+    const rs = await createStudent(makeInput({ firstName: "Red", lastName: "Stripe", track: "tiger", beltRankId: redStripe.id, dateOfBirth: "2022-01-01" }));
+    // Plain tiger cub aged 6+ — now included.
+    const big = await createStudent(makeInput({ firstName: "Big", lastName: "Cub", track: "tiger", beltRankId: tigerWhite.id, dateOfBirth: "2019-01-01" }));
+    // Plain tiger cub under 6 — excluded.
+    const lil = await createStudent(makeInput({ firstName: "Lil", lastName: "Cub", track: "tiger", beltRankId: tigerWhite.id, dateOfBirth: "2022-01-01" }));
     const jrwy = await studentsForClass("jr-wy");
-    expect(jrwy.some((s) => s.id === rs)).toBe(true); // red stripe attends Jr. W&Y too
-    expect(jrwy.some((s) => s.id === tw)).toBe(false); // a plain tiger cub does not
+    expect(jrwy.some((s) => s.id === rs)).toBe(true);
+    expect(jrwy.some((s) => s.id === big)).toBe(true);
+    expect(jrwy.some((s) => s.id === lil)).toBe(false);
+  });
+
+  it("Private Lessons roster is the whole active student body (any track), inactive excluded", async () => {
+    const ranks = await listBeltRanks();
+    const tigerWhite = ranks.find((r) => r.track === "tiger" && r.sortOrder === 0)!;
+    const jrWhite = ranks.find((r) => r.track === "regular" && r.sortOrder === 0)!;
+    const t = await createStudent(makeInput({ firstName: "Priv", lastName: "Tiger", track: "tiger", beltRankId: tigerWhite.id }));
+    const r = await createStudent(makeInput({ firstName: "Priv", lastName: "Regular", track: "regular", ageGroup: "jr", beltRankId: jrWhite.id }));
+    const gone = await createStudent(makeInput({ firstName: "Priv", lastName: "Gone", beltRankId: jrWhite.id }));
+    await setStudentActive(gone, false);
+
+    const roster = await studentsForClass("private");
+    expect(roster.some((s) => s.id === t)).toBe(true);
+    expect(roster.some((s) => s.id === r)).toBe(true);
+    expect(roster.some((s) => s.id === gone)).toBe(false);
+    // Tiger Cubs sort before regular belts.
+    expect(roster.findIndex((s) => s.id === t)).toBeLessThan(roster.findIndex((s) => s.id === r));
+  });
+
+  it("Jr. White & Yellow lists Tiger Cubs before regular White/Yellow belts", async () => {
+    const ranks = await listBeltRanks();
+    const redStripe = ranks.find((r) => r.name === "Tiger Cub Red Stripe")!;
+    const jrWhite = ranks.find((r) => r.track === "regular" && r.sortOrder === 0)!;
+    // Names chosen so a plain last-name sort would put the White belt first.
+    const tigerId = await createStudent(makeInput({ firstName: "A", lastName: "Zzz", track: "tiger", beltRankId: redStripe.id }));
+    const whiteId = await createStudent(makeInput({ firstName: "B", lastName: "Aaa", track: "regular", ageGroup: "jr", beltRankId: jrWhite.id }));
+    const roster = await studentsForClass("jr-wy");
+    const ti = roster.findIndex((s) => s.id === tigerId);
+    const wi = roster.findIndex((s) => s.id === whiteId);
+    expect(ti).toBeGreaterThanOrEqual(0);
+    expect(wi).toBeGreaterThanOrEqual(0);
+    expect(ti).toBeLessThan(wi); // Tiger Cub precedes the White belt
+  });
+});
+
+describe("testing progress (stripes + PTT)", () => {
+  it("listStudentsWithProgress reflects stripe and PTT updates", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "Pro", lastName: "Gress", beltRankId: rank.id }));
+
+    let row = (await listStudentsWithProgress()).find((s) => s.id === id)!;
+    // Fresh progress row starts all-false.
+    expect(row.blueStripe).toBe(false);
+    expect(row.greenStripe).toBe(false);
+    expect(row.permissionToTest).toBe(false);
+
+    await updateProgress(id, { blueStripe: true, greenStripe: true, permissionToTest: true });
+    row = (await listStudentsWithProgress()).find((s) => s.id === id)!;
+    expect(row.blueStripe).toBe(true);
+    expect(row.greenStripe).toBe(true);
+    expect(row.orangeStripe).toBe(false);
+    expect(row.permissionToTest).toBe(true);
+  });
+});
+
+describe("upcoming agenda (events + testings, next 4 weeks)", () => {
+  const shift = (days: number) => {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    return d.toISOString().slice(0, 10);
+  };
+  it("includes events within 4 weeks and excludes those beyond, soonest first", async () => {
+    await createEvent({ name: "Near Seminar", eventDate: shift(8), eventTime: null, eventType: "Seminar", location: null, notes: null });
+    await createEvent({ name: "Far Camp", eventDate: shift(45), eventTime: null, eventType: "Camp", location: null, notes: null });
+    await createEvent({ name: "Past Demo", eventDate: shift(-3), eventTime: null, eventType: "Demo", location: null, notes: null });
+
+    const agenda = await getUpcomingAgenda(28);
+    const names = agenda.map((i) => i.name);
+    expect(names).toContain("Near Seminar");
+    expect(names).not.toContain("Far Camp");
+    expect(names).not.toContain("Past Demo");
+    // Sorted ascending by date.
+    const dates = agenda.map((i) => i.date);
+    expect([...dates].sort()).toEqual(dates);
   });
 });
 
@@ -414,5 +515,24 @@ describe("event roster export", () => {
     const order = (await buildEventRosterCsv(eventId)).split("\r\n").slice(1).map((r) => r.split(",")[0]);
     expect(order.indexOf("Aaa Tigerkid")).toBeLessThan(order.indexOf("Bbb Juniorkid"));
     expect(order.indexOf("Bbb Juniorkid")).toBeLessThan(order.indexOf("Ccc Adultone"));
+  });
+});
+
+// Registers students to the active cycle, so keep this last (registrations persist).
+describe("certificate data rows", () => {
+  it("maps each registered student to full name + cert-formatted NEW rank", async () => {
+    const ranks = await listBeltRanks();
+    const green = ranks.find((r) => r.name === "Green Belt")!;
+    const black1 = ranks.find((r) => r.name === "1st Degree Black L1")!;
+    const greenId = await createStudent(makeInput({ firstName: "Cert", lastName: "Greene", beltRankId: green.id }));
+    const blackId = await createStudent(makeInput({ firstName: "Cert", lastName: "Blackman", ageGroup: "adult", beltRankId: black1.id }));
+
+    const cycle = await getCurrentCycle();
+    await registerToTest(cycle.id, greenId);
+    await registerToTest(cycle.id, blackId);
+
+    const rows = await buildCertificateRows(cycle.id);
+    expect(rows.find((r) => r.name === "Cert Greene")?.rank).toBe("Senior Green Belt"); // Green → Sr. Green, spelled out
+    expect(rows.find((r) => r.name === "Cert Blackman")?.rank).toBe("1st Degree Black Level 2"); // L1 → L2, cert wording
   });
 });

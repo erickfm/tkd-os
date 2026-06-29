@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { Award, Download, Printer, Trash2, UserPlus } from "lucide-react";
+import { Award, Download, FileSpreadsheet, Printer, Trash2, UserPlus } from "lucide-react";
 
 import { PageHeader } from "@/components/PageHeader";
 import { BeltBadge } from "@/components/BeltBadge";
 import { Button, EmptyState, Select, TextInput } from "@/components/ui";
 import {
   buildBeltLabelsHtml,
+  buildCertificateRows,
   buildTestingCycleCsv,
   getCurrentCycle,
   getCycleCandidates,
@@ -20,7 +21,8 @@ import {
 } from "@/db/repos";
 import type { TestingCycle } from "@/db/schema";
 import { saveTextFile } from "@/lib/download";
-import { ageFromDob, prettyDate } from "@/lib/format";
+import { exportCertificateData } from "@/lib/certificateExport";
+import { ageFromDob, beltRankOrder, prettyDate } from "@/lib/format";
 
 type CandSort = "first" | "last" | "age" | "belt" | "attendance";
 
@@ -101,6 +103,14 @@ export function TestingCyclePage() {
     setExportMsg(saved ? "Testing list saved." : "Export canceled.");
   }
 
+  async function exportCertificates() {
+    if (!cycle) return;
+    const rows = await buildCertificateRows(cycle.id);
+    if (rows.length === 0) { setExportMsg("No students with a next rank to certify."); return; }
+    const saved = await exportCertificateData(rows, cycle.startDate);
+    setExportMsg(saved ? `Certificate data created for ${rows.length} student${rows.length === 1 ? "" : "s"}.` : "Export canceled.");
+  }
+
   async function printLabels() {
     if (!cycle) return;
     const html = await buildBeltLabelsHtml(cycle.id);
@@ -119,7 +129,7 @@ export function TestingCyclePage() {
         case "first": return s.firstName.toLowerCase();
         case "last": return s.lastName.toLowerCase();
         case "age": return ageFromDob(s.dateOfBirth) ?? -1;
-        case "belt": return `${s.rank.track} ${String(s.rank.sortOrder).padStart(3, "0")}`;
+        case "belt": return beltRankOrder(s.rank);
         case "attendance": return s.attendanceThisCycle;
       }
     };
@@ -137,6 +147,7 @@ export function TestingCyclePage() {
         subtitle={cycle ? `${prettyDate(cycle.startDate)} – ${prettyDate(cycle.endDate)} · ${roster.length} registered to test` : "Loading…"}
         actions={
           <>
+            <Button variant="secondary" onClick={exportCertificates} disabled={roster.length === 0}><FileSpreadsheet size={16} />Certificate data</Button>
             <Button variant="secondary" onClick={printLabels} disabled={roster.length === 0}><Printer size={16} />Belt labels</Button>
             <Button variant="secondary" onClick={exportTsv} disabled={roster.length === 0}><Download size={16} />Export</Button>
             <Button variant="primary" onClick={promote} disabled={busy || roster.length === 0}><Award size={16} />{busy ? "Promoting…" : "Promote all"}</Button>

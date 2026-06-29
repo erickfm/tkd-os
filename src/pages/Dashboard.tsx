@@ -3,25 +3,24 @@ import { useNavigate } from "react-router-dom";
 import { Award, CalendarDays, GraduationCap, Sparkles, Users } from "lucide-react";
 
 import { PageHeader } from "@/components/PageHeader";
-import { getDashboardAlerts, getDashboardStats, listEvents, type DashboardAlerts, type DashboardStats } from "@/db/repos";
-import type { EventRow } from "@/db/schema";
-import { prettyDate, today } from "@/lib/format";
+import { getDashboardAlerts, getDashboardStats, getUpcomingAgenda, type DashboardAlerts, type DashboardStats, type UpcomingItem } from "@/db/repos";
+import { prettyDate } from "@/lib/format";
 
 export function DashboardPage() {
   const navigate = useNavigate();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [alerts, setAlerts] = useState<DashboardAlerts | null>(null);
-  const [upcoming, setUpcoming] = useState<EventRow[]>([]);
+  const [upcoming, setUpcoming] = useState<UpcomingItem[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [absencesExpanded, setAbsencesExpanded] = useState(false);
 
   useEffect(() => {
     (async () => {
       try {
-        const [s, a, evs] = await Promise.all([getDashboardStats(), getDashboardAlerts(), listEvents()]);
+        const [s, a, agenda] = await Promise.all([getDashboardStats(), getDashboardAlerts(), getUpcomingAgenda()]);
         setStats(s);
         setAlerts(a);
-        const t = today();
-        setUpcoming(evs.filter((e) => e.isActive && e.eventDate >= t).slice(0, 5));
+        setUpcoming(agenda);
       } catch (e) {
         setError(String(e));
       }
@@ -59,34 +58,41 @@ export function DashboardPage() {
                   </AlertCard>
                 )}
                 {alerts.recurringAbsences.length > 0 && (
-                  <AlertCard title={`Recurring absences (${alerts.recurringAbsences.length})`}>
-                    {alerts.recurringAbsences.slice(0, 10).map((a) => (
+                  <AlertCard
+                    title={`Recurring absences (${alerts.recurringAbsences.length})`}
+                    footer={alerts.recurringAbsences.length > 10 ? (
+                      <button
+                        onClick={() => setAbsencesExpanded((v) => !v)}
+                        className="w-full border-t border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-center text-xs font-medium text-[var(--color-brand)] hover:bg-[var(--color-surface-3)]"
+                      >
+                        {absencesExpanded ? "Show fewer" : `Show all ${alerts.recurringAbsences.length}`}
+                      </button>
+                    ) : undefined}
+                  >
+                    {(absencesExpanded ? alerts.recurringAbsences : alerts.recurringAbsences.slice(0, 10)).map((a) => (
                       <AlertRow key={a.id} onClick={() => navigate("/students")} name={a.name}
                         detail={`last seen ${prettyDate(a.lastPresent)}`} />
                     ))}
-                    {alerts.recurringAbsences.length > 10 && (
-                      <div className="px-3 py-2 text-xs text-[var(--color-fg-muted)]">+{alerts.recurringAbsences.length - 10} more</div>
-                    )}
                   </AlertCard>
                 )}
               </div>
             </div>
           )}
 
-          <h2 className="mb-3 mt-8 text-lg font-semibold tracking-tight">Upcoming events</h2>
+          <h2 className="mb-3 mt-8 text-lg font-semibold tracking-tight">Upcoming events &amp; testings</h2>
           {upcoming.length === 0 ? (
             <div className="rounded-lg border border-dashed border-[var(--color-border)] p-6 text-center text-sm text-[var(--color-fg-muted)]">
-              No upcoming events scheduled.
+              Nothing scheduled in the next 4 weeks.
             </div>
           ) : (
             <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
               <table className="w-full text-sm">
                 <tbody>
                   {upcoming.map((e) => (
-                    <tr key={e.id} onClick={() => navigate("/events")} className="cursor-pointer border-t border-[var(--color-border)] first:border-t-0 hover:bg-[var(--color-surface-2)]">
+                    <tr key={`${e.kind}-${e.id}`} onClick={() => navigate(e.kind === "testing" ? "/testing-cycle" : "/events")} className="cursor-pointer border-t border-[var(--color-border)] first:border-t-0 hover:bg-[var(--color-surface-2)]">
                       <td className="px-4 py-3 font-medium">{e.name}</td>
-                      <td className="px-4 py-3 text-[var(--color-fg-muted)]">{e.eventType}</td>
-                      <td className="px-4 py-3 text-right">{prettyDate(e.eventDate)}</td>
+                      <td className="px-4 py-3 text-[var(--color-fg-muted)]">{e.typeLabel}</td>
+                      <td className="px-4 py-3 text-right">{prettyDate(e.date)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -99,11 +105,12 @@ export function DashboardPage() {
   );
 }
 
-function AlertCard({ title, children }: { title: string; children: React.ReactNode }) {
+function AlertCard({ title, children, footer }: { title: string; children: React.ReactNode; footer?: React.ReactNode }) {
   return (
     <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
       <div className="border-b border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm font-medium">{title}</div>
       <div className="max-h-64 overflow-auto">{children}</div>
+      {footer}
     </div>
   );
 }

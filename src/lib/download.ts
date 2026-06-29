@@ -18,6 +18,7 @@ export async function saveTextFile(
   const path = await save({ defaultPath: defaultName, filters: [filter] });
   if (!path) return false;
   await invoke("write_text_file", { path, contents: text });
+  await openSaved(path);
   return true;
 }
 
@@ -33,5 +34,17 @@ export async function saveBytesFile(
   const path = await save({ defaultPath: defaultName, filters: [{ name: filterName, extensions: [ext] }] });
   if (!path) return false;
   await invoke("write_bytes_file", { path, bytes: Array.from(bytes) });
+  await openSaved(path);
   return true;
+}
+
+/** Open the just-saved file in the OS default app. Best-effort — a failure to
+ * open should not make the (successful) save look like it failed. */
+async function openSaved(path: string): Promise<void> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("open_path", { path });
+  } catch {
+    /* file is saved; opening is a convenience only */
+  }
 }

@@ -4,7 +4,7 @@ import { Download, Plus, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/PageHeader";
 import { Button, TextInput } from "@/components/ui";
 import {
-  addInventoryItem,
+  addInventoryItems,
   deleteInventoryItem,
   listInventory,
   updateInventoryItem,
@@ -42,7 +42,7 @@ export function InventoryPage() {
 
   async function add(sectionId: number, name: string, size: string) {
     if (!name.trim()) return;
-    await addInventoryItem(sectionId, name.trim(), size.trim() || null);
+    await addInventoryItems(sectionId, name.trim(), parseSizes(size));
     await load();
   }
   async function remove(itemId: number) {
@@ -119,27 +119,39 @@ function SectionCard({ name, updatedAt, items, onSaveCount, onAdd, onRemove, onE
             </tr>
           </thead>
           <tbody>
-            {items.map((it) => (
-              <tr key={it.id} className="border-t border-[var(--color-border)]">
-                <td className="px-3 py-1.5">{it.name}</td>
-                <td className="px-3 py-1.5 text-[var(--color-fg-muted)]">{it.size ?? "—"}</td>
-                <td className="px-3 py-1.5 text-right">
-                  <CountInput value={it.inStock} onCommit={(raw) => onSaveCount(it, "inStock", raw)} />
-                </td>
-                <td className="px-3 py-1.5 text-right">
-                  <CountInput value={it.toOrder} onCommit={(raw) => onSaveCount(it, "toOrder", raw)} />
-                </td>
-                <td className="px-3 py-1.5 text-right">
-                  <button onClick={() => onRemove(it.id)} className="text-[var(--color-fg-muted)] hover:text-red-600" aria-label="Remove item"><Trash2 size={14} /></button>
-                </td>
-              </tr>
-            ))}
+            {groupByName(items).map((group) =>
+              group.items.map((it, i) => (
+                <tr
+                  key={it.id}
+                  className={i === 0 ? "border-t-2 border-[var(--color-border)]" : "border-t border-[var(--color-border)]/60"}
+                >
+                  {i === 0 && (
+                    <td
+                      rowSpan={group.items.length}
+                      className="border-r border-[var(--color-border)] px-3 py-2 align-top font-medium"
+                    >
+                      {group.name}
+                    </td>
+                  )}
+                  <td className="px-3 py-1.5">{it.size ?? <span className="text-[var(--color-fg-muted)]">—</span>}</td>
+                  <td className="px-3 py-1.5 text-right">
+                    <CountInput value={it.inStock} onCommit={(raw) => onSaveCount(it, "inStock", raw)} />
+                  </td>
+                  <td className="px-3 py-1.5 text-right">
+                    <CountInput value={it.toOrder} onCommit={(raw) => onSaveCount(it, "toOrder", raw)} />
+                  </td>
+                  <td className="px-3 py-1.5 text-right">
+                    <button onClick={() => onRemove(it.id)} className="text-[var(--color-fg-muted)] hover:text-red-600" aria-label="Remove item"><Trash2 size={14} /></button>
+                  </td>
+                </tr>
+              )),
+            )}
             {items.length === 0 && (
               <tr><td colSpan={5} className="p-4 text-center text-sm text-[var(--color-fg-muted)]">No items — add one below.</td></tr>
             )}
             <tr className="border-t border-[var(--color-border)] bg-[var(--color-surface-2)]">
               <td className="px-3 py-2"><TextInput value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="New item…" className="w-full" /></td>
-              <td className="px-3 py-2"><TextInput value={newSize} onChange={(e) => setNewSize(e.target.value)} placeholder="Size (optional)" className="w-full" /></td>
+              <td className="px-3 py-2"><TextInput value={newSize} onChange={(e) => setNewSize(e.target.value)} placeholder="Size(s) — e.g. 1-7 or S, M, L" className="w-full" /></td>
               <td colSpan={3} className="px-3 py-2">
                 <Button variant="secondary" onClick={submitAdd} disabled={!newName.trim()}><Plus size={14} />Add</Button>
               </td>
@@ -149,6 +161,45 @@ function SectionCard({ name, updatedAt, items, onSaveCount, onAdd, onRemove, onE
       </div>
     </section>
   );
+}
+
+// Parse the size field into a list, one entry per item row. Accepts a comma- or
+// space-separated list and numeric ranges, so "1-7" adds sizes 1 through 7 and
+// "S, M, L" adds three. Empty input → no sizes (a single null-size row).
+function parseSizes(raw: string): string[] {
+  const out: string[] = [];
+  for (const token of raw.split(/[,\s]+/)) {
+    const t = token.trim();
+    if (!t) continue;
+    const range = t.match(/^(\d+)-(\d+)$/);
+    if (range) {
+      let a = parseInt(range[1], 10);
+      let b = parseInt(range[2], 10);
+      if (a > b) [a, b] = [b, a];
+      for (let n = a; n <= b; n++) out.push(String(n));
+    } else {
+      out.push(t);
+    }
+  }
+  return [...new Set(out)];
+}
+
+// Group items by name (keeping first-seen order) so each item appears once with
+// its sizes beneath it. New sizes are appended to the table, so we group by name
+// rather than by adjacency — a later "Boots" still joins the existing Boots group.
+function groupByName(items: InventoryItem[]): { name: string; items: InventoryItem[] }[] {
+  const groups: { name: string; items: InventoryItem[] }[] = [];
+  const byName = new Map<string, InventoryItem[]>();
+  for (const it of items) {
+    let bucket = byName.get(it.name);
+    if (!bucket) {
+      bucket = [];
+      byName.set(it.name, bucket);
+      groups.push({ name: it.name, items: bucket });
+    }
+    bucket.push(it);
+  }
+  return groups;
 }
 
 // Local value so typing is smooth; commit (persist) on blur or Enter.

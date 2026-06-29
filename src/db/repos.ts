@@ -18,7 +18,7 @@ import {
   testingRegistration,
 } from "./schema";
 import type { BeltRank, InventoryItem, InventorySection, Student, TestingCycle } from "./schema";
-import { ageFromDob, today } from "@/lib/format";
+import { ageFromDob, beltRankOrder, today } from "@/lib/format";
 
 // ----------------------------------------------------------------------------
 // Belt ranks
@@ -125,6 +125,41 @@ export async function listStudents(): Promise<StudentRow[]> {
     .leftJoin(studentProgress, eq(studentProgress.studentId, students.id))
     .orderBy(asc(students.lastName), asc(students.firstName));
   return rows.map((x) => ({ ...x.s, rank: toRank(x), permissionToTest: Boolean(x.ptt) }));
+}
+
+export interface ProgressRow extends StudentRow {
+  greenStripe: boolean;
+  blueStripe: boolean;
+  orangeStripe: boolean;
+  redStripe: boolean;
+}
+
+/** All students with their full progress (4 stripes + PTT) for the Testing Progress tab. */
+export async function listStudentsWithProgress(): Promise<ProgressRow[]> {
+  const db = await getDb();
+  const rows = await db
+    .select({
+      s: students,
+      ...rankCols,
+      green: studentProgress.greenStripe,
+      blue: studentProgress.blueStripe,
+      orange: studentProgress.orangeStripe,
+      red: studentProgress.redStripe,
+      ptt: studentProgress.permissionToTest,
+    })
+    .from(students)
+    .innerJoin(beltRanks, eq(students.beltRankId, beltRanks.id))
+    .leftJoin(studentProgress, eq(studentProgress.studentId, students.id))
+    .orderBy(asc(students.lastName), asc(students.firstName));
+  return rows.map((x) => ({
+    ...x.s,
+    rank: toRank(x),
+    permissionToTest: Boolean(x.ptt),
+    greenStripe: Boolean(x.green),
+    blueStripe: Boolean(x.blue),
+    orangeStripe: Boolean(x.orange),
+    redStripe: Boolean(x.red),
+  }));
 }
 
 export interface StudentInput {
@@ -718,11 +753,83 @@ export async function buildTestingCycleCsv(cycleId: number): Promise<string> {
   return lines.join("\r\n");
 }
 
+// Certificate "Color" wording, matching the school's historical mail-merge files
+// (Dropbox "Certificate Data"). Keyed by the app belt name → the exact text that
+// prints on the certificate: Tiger Cubs as "Cub/<color>", seniors spelled out as
+// "Senior …", and black degrees as "<n> Degree Black Level <m>" (per the linked
+// July 2025 reference). Anything not listed falls back to the app belt name.
+const CERT_BELT_NAME: Record<string, string> = {
+  "Tiger Cub White Belt": "Cub/White",
+  "Tiger Cub Yellow Stripe": "Cub/Yellow",
+  "Tiger Cub Green Stripe": "Cub/Green",
+  "Tiger Cub Blue Stripe": "Cub/Blue",
+  "Tiger Cub Purple Stripe": "Cub/Purple",
+  "Tiger Cub Brown Stripe": "Cub/Brown",
+  "Tiger Cub Red Stripe": "Cub/Red",
+  "Tiger Cub Black Stripe": "Cub/Black",
+  "White Belt": "White Belt",
+  "Yellow Belt": "Yellow Belt",
+  "Green Belt": "Green Belt",
+  "Sr. Green Belt": "Senior Green Belt",
+  "Blue Belt": "Blue Belt",
+  "Sr. Blue Belt": "Senior Blue Belt",
+  "Purple Belt": "Purple Belt",
+  "Sr. Purple Belt": "Senior Purple Belt",
+  "Brown Belt L1": "Brown Belt L1",
+  "Brown Belt L2": "Brown Belt L2",
+  "Brown Belt L3": "Brown Belt L3",
+  "Red Belt L1": "Red Belt L1",
+  "Red Belt L2": "Red Belt L2",
+  "Red Belt L3": "Red Belt L3",
+  "1st Degree Black L1": "1st Degree Black Level 1",
+  "1st Degree Black L2": "1st Degree Black Level 2",
+  "1st Degree Black L3": "1st Degree Black Level 3",
+  "1st Degree Black L4": "1st Degree Black Level 4",
+  "2nd Degree Black L1": "2nd Degree Black Level 1",
+  "2nd Degree Black L2": "2nd Degree Black Level 2",
+  "2nd Degree Black L3": "2nd Degree Black Level 3",
+  "2nd Degree Black L4": "2nd Degree Black Level 4",
+  "3rd Degree Black L1": "3rd Degree Black Level 1",
+  "3rd Degree Black L2": "3rd Degree Black Level 2",
+  "3rd Degree Black L3": "3rd Degree Black Level 3",
+  "3rd Degree Black L4": "3rd Degree Black Level 4",
+  "4th Degree Black": "4th Degree Black Belt",
+  "5th Degree Black": "5th Degree Black Belt",
+  "6th Degree Black": "6th Degree Black Belt",
+  "7th Degree Black": "7th Degree Black Belt",
+  "8th Degree Black": "8th Degree Black Belt",
+  "9th Degree Black": "9th Degree Black Belt",
+};
+
+export interface CertificateRow {
+  name: string;
+  rank: string;
+}
+
+/**
+ * Rows for the certificate-data spreadsheet (mail-merge source): each registered
+ * student's full name + the NEW rank they earn at this testing, in certificate
+ * wording, ordered by that new rank. Students already at the top rank (no next
+ * rank) are omitted.
+ */
+export async function buildCertificateRows(cycleId: number): Promise<CertificateRow[]> {
+  const regs = await getCycleRegistrations(cycleId);
+  const byId = new Map((await listBeltRanks()).map((r) => [r.id, r]));
+  return regs
+    .map((s) => ({ s, next: s.rank.nextRankId ? byId.get(s.rank.nextRankId) ?? null : null }))
+    .filter((x): x is { s: TestingRow; next: BeltRank } => x.next != null)
+    .sort((a, b) =>
+      beltRankOrder(a.next) - beltRankOrder(b.next) ||
+      a.s.lastName.localeCompare(b.s.lastName) ||
+      a.s.firstName.localeCompare(b.s.firstName))
+    .map((x) => ({ name: `${x.s.firstName} ${x.s.lastName}`, rank: CERT_BELT_NAME[x.next.name] ?? x.next.name }));
+}
+
 // ----------------------------------------------------------------------------
 // Attendance
 // ----------------------------------------------------------------------------
 
-export type ClassType = "tiger" | "jr-wy" | "jr-gbp" | "jr-brb" | "adult";
+export type ClassType = "tiger" | "jr-wy" | "jr-gbp" | "jr-brb" | "adult" | "private";
 
 export async function getOrCreateSession(
   date: string,
@@ -750,6 +857,14 @@ export async function getOrCreateSession(
 export async function studentsForClass(classType: ClassType): Promise<StudentRow[]> {
   const db = await getDb();
 
+  // Private Lessons: any student may attend, so the roster is the whole active
+  // student body (Tiger Cubs first, then by rank).
+  if (classType === "private") {
+    return (await listStudents())
+      .filter((s) => s.isActive)
+      .sort((a, b) => beltRankOrder(a.rank) - beltRankOrder(b.rank) || a.lastName.localeCompare(b.lastName));
+  }
+
   // Adult class: regular adults, plus ANY active student aged 12+ (by DOB) —
   // older juniors may attend the adult class too. Age isn't stored in SQL, so
   // filter in JS over the active roster.
@@ -764,19 +879,40 @@ export async function studentsForClass(classType: ClassType): Promise<StudentRow
       .sort((a, b) => a.rank.sortOrder - b.rank.sortOrder || a.lastName.localeCompare(b.lastName));
   }
 
+  if (classType === "jr-wy") {
+    // Jr. White & Yellow: regular jr W/Y students, plus Tiger Cubs who may also
+    // attend this class — Tiger Cub Red Stripes (any age) and any Tiger Cub
+    // aged 6+. Age isn't stored in SQL, so the 6+ cutoff is applied in JS.
+    const rows = await db
+      .select({ s: students, ...rankCols, ptt: studentProgress.permissionToTest })
+      .from(students)
+      .innerJoin(beltRanks, eq(students.beltRankId, beltRanks.id))
+      .leftJoin(studentProgress, eq(studentProgress.studentId, students.id))
+      .where(
+        and(
+          eq(students.isActive, true),
+          or(
+            and(eq(students.track, "regular"), eq(students.ageGroup, "jr"), eq(beltRanks.classGroup, "jr-wy")),
+            eq(students.track, "tiger"),
+          ),
+        ),
+      )
+      .orderBy(asc(beltRanks.sortOrder), asc(students.lastName));
+    return rows
+      .map((x) => ({ ...x.s, rank: toRank(x), permissionToTest: Boolean(x.ptt) }))
+      .filter(
+        (s) =>
+          s.track !== "tiger" ||
+          s.rank.name === "Tiger Cub Red Stripe" ||
+          (ageFromDob(s.dateOfBirth) ?? -1) >= 6,
+      )
+      // Tiger Cubs rank before regular White/Yellow belts.
+      .sort((a, b) => beltRankOrder(a.rank) - beltRankOrder(b.rank) || a.lastName.localeCompare(b.lastName));
+  }
+
   let where;
   if (classType === "tiger") {
     where = and(eq(students.isActive, true), eq(students.track, "tiger"));
-  } else if (classType === "jr-wy") {
-    // Jr. White & Yellow: regular jr W/Y students, plus Tiger Cub Red Stripes,
-    // who may attend either the Tiger or the Jr. W&Y class.
-    where = and(
-      eq(students.isActive, true),
-      or(
-        and(eq(students.track, "regular"), eq(students.ageGroup, "jr"), eq(beltRanks.classGroup, "jr-wy")),
-        and(eq(students.track, "tiger"), eq(beltRanks.name, "Tiger Cub Red Stripe")),
-      ),
-    );
   } else {
     where = and(
       eq(students.isActive, true),
@@ -877,6 +1013,9 @@ export async function classesSincePromotion(studentId: number): Promise<number> 
 // Dashboard
 // ----------------------------------------------------------------------------
 
+/** "Upcoming" means scheduled within the next 4 weeks (inclusive of today). */
+export const UPCOMING_DAYS = 28;
+
 export interface DashboardStats {
   activeTotal: number;
   tiger: number;
@@ -891,6 +1030,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   const all = await listStudents();
   const active = all.filter((s) => s.isActive);
   const t = today();
+  const end = addDays(t, UPCOMING_DAYS);
   const evs = await listEvents();
   return {
     activeTotal: active.length,
@@ -898,9 +1038,42 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     regular: active.filter((s) => s.track === "regular").length,
     black: active.filter((s) => s.rank.degree != null).length,
     permissionToTest: active.filter((s) => s.permissionToTest).length,
-    upcomingEvents: evs.filter((e) => e.isActive && e.eventDate >= t).length,
+    upcomingEvents: evs.filter((e) => e.isActive && e.eventDate >= t && e.eventDate <= end).length,
     onTrial: active.filter((s) => s.trialStartDate != null).length,
   };
+}
+
+export interface UpcomingItem {
+  kind: "event" | "testing";
+  id: number;
+  name: string;
+  typeLabel: string;
+  date: string;
+}
+
+/**
+ * Events and belt testings scheduled within the next `withinDays` (default 4
+ * weeks), soonest first. Testing = the active cycle's testing day (testing_date,
+ * or the cycle end date if that isn't set yet).
+ */
+export async function getUpcomingAgenda(withinDays = UPCOMING_DAYS): Promise<UpcomingItem[]> {
+  const t = today();
+  const end = addDays(t, withinDays);
+  const items: UpcomingItem[] = [];
+
+  for (const e of await listEvents()) {
+    if (e.isActive && e.eventDate >= t && e.eventDate <= end) {
+      items.push({ kind: "event", id: e.id, name: e.name, typeLabel: e.eventType, date: e.eventDate });
+    }
+  }
+
+  const cycle = await getCurrentCycle();
+  const testDay = cycle.testingDate ?? cycle.endDate;
+  if (testDay >= t && testDay <= end) {
+    items.push({ kind: "testing", id: cycle.id, name: "Belt Testing", typeLabel: "Testing", date: testDay });
+  }
+
+  return items.sort((a, b) => a.date.localeCompare(b.date));
 }
 
 // ----------------------------------------------------------------------------
@@ -1111,6 +1284,35 @@ export async function addInventoryItem(
     .returning({ id: inventoryItems.id });
   await touchSection(sectionId);
   return row.id;
+}
+
+/**
+ * Add one or more rows for a single item name — one row per size, so a multi-size
+ * item (e.g. a belt color in sizes 1–7) keeps the same grouped layout as the rest.
+ * With no sizes, adds a single row with null size. Returns the new item ids.
+ */
+export async function addInventoryItems(
+  sectionId: number,
+  name: string,
+  sizes: (string | null)[],
+): Promise<number[]> {
+  const db = await getDb();
+  const [max] = await db
+    .select({ m: sql<number>`coalesce(max(${inventoryItems.sortOrder}), -1)` })
+    .from(inventoryItems)
+    .where(eq(inventoryItems.sectionId, sectionId));
+  let order = Number(max?.m ?? -1);
+  const ids: number[] = [];
+  for (const size of sizes.length ? sizes : [null]) {
+    order += 1;
+    const [row] = await db
+      .insert(inventoryItems)
+      .values({ sectionId, name, size, sortOrder: order })
+      .returning({ id: inventoryItems.id });
+    ids.push(row.id);
+  }
+  await touchSection(sectionId);
+  return ids;
 }
 
 export async function deleteInventoryItem(itemId: number): Promise<void> {

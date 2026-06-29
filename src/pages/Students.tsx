@@ -13,7 +13,7 @@ import {
 } from "@/db/repos";
 import type { BeltRank } from "@/db/schema";
 import { BELT_SIZES } from "@/db/enums";
-import { AGE_GROUP_LABEL, prettyDate, TRACK_LABEL } from "@/lib/format";
+import { AGE_GROUP_LABEL, beltRankOrder, prettyDate, TRACK_LABEL } from "@/lib/format";
 
 type TrackFilter = "all" | "regular" | "tiger";
 type Special = "all" | "black" | "ptt";
@@ -30,7 +30,7 @@ const beltSizeSort = (r: StudentRow) => {
 // Ascending comparator per column; direction is applied by the caller.
 const COMPARATORS: Record<SortKey, (a: StudentRow, b: StudentRow) => number> = {
   name: (a, b) => a.lastName.localeCompare(b.lastName) || a.firstName.localeCompare(b.firstName),
-  belt: (a, b) => a.rank.track.localeCompare(b.rank.track) || a.rank.sortOrder - b.rank.sortOrder,
+  belt: (a, b) => beltRankOrder(a.rank) - beltRankOrder(b.rank),
   track: (a, b) => TRACK_LABEL[a.track].localeCompare(TRACK_LABEL[b.track]),
   ageGroup: (a, b) => ageGroupSort(a).localeCompare(ageGroupSort(b)),
   beltSize: (a, b) => beltSizeSort(a) - beltSizeSort(b),

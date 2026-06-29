@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { Drawer } from "@/components/Drawer";
+import { BeltBadge } from "@/components/BeltBadge";
 import { Button, Field, Select, TextInput, Textarea } from "@/components/ui";
 import { BELT_SIZES, CLASS_TYPE_LABELS } from "@/db/enums";
 import type { BeltRank } from "@/db/schema";
@@ -8,6 +9,7 @@ import {
   createStudent,
   getProgress,
   getStudentAttendance,
+  listRankHistory,
   setStudentActive,
   updateProgress,
   updateStudent,
@@ -15,7 +17,9 @@ import {
   type StudentInput,
   type StudentRow,
 } from "@/db/repos";
-import { prettyDate, today } from "@/lib/format";
+import { ageFromDob, prettyDate, today } from "@/lib/format";
+
+type RankHistoryEntry = Awaited<ReturnType<typeof listRankHistory>>[number];
 
 type ProgressState = {
   greenStripe: boolean;
@@ -98,6 +102,12 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
   useEffect(() => {
     if (!open || !editing) { setAttendance(null); return; }
     getStudentAttendance(editing.id).then(setAttendance);
+  }, [open, editing]);
+
+  const [history, setHistory] = useState<RankHistoryEntry[] | null>(null);
+  useEffect(() => {
+    if (!open || !editing) { setHistory(null); return; }
+    listRankHistory(editing.id).then(setHistory);
   }, [open, editing]);
 
   const ranksForTrack = useMemo(
@@ -211,7 +221,7 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
             {BELT_SIZES.map((s) => <option key={s} value={s}>{s}</option>)}
           </Select>
         </Field>
-        <Field label="Date of birth">
+        <Field label={`Date of birth${ageFromDob(form.dateOfBirth) != null ? ` · age ${ageFromDob(form.dateOfBirth)}` : ""}`}>
           <TextInput type="date" value={form.dateOfBirth ?? ""} onChange={(e) => set("dateOfBirth", e.target.value || null)} />
         </Field>
       </div>
@@ -274,9 +284,30 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
         </div>
       )}
 
+      {editing && history && (
+        <div className="mt-3 rounded-md border border-[var(--color-border)] p-3">
+          <div className="mb-2 text-sm font-medium">Promotion history{history.length > 0 ? ` (${history.length})` : ""}</div>
+          {history.length === 0 ? (
+            <p className="text-xs text-[var(--color-fg-muted)]">No promotions recorded yet.</p>
+          ) : (
+            <ul className="max-h-64 overflow-auto text-sm">
+              {history.map((row) => (
+                <li key={row.h.id} className="flex items-center justify-between gap-3 border-t border-[var(--color-border)] py-1.5 first:border-t-0">
+                  <span className="shrink-0 text-[var(--color-fg-muted)]">{prettyDate(row.h.promotionDate)}</span>
+                  <span className="flex min-w-0 items-center gap-2">
+                    <BeltBadge rank={row.to} size="sm" />
+                    {row.h.note && <span className="truncate text-xs text-[var(--color-fg-muted)]" title={row.h.note}>{row.h.note}</span>}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
       {editing && attendance && (
         <div className="mt-3 rounded-md border border-[var(--color-border)] p-3">
-          <div className="mb-2 text-sm font-medium">Attendance</div>
+          <div className="mb-2 text-sm font-medium">Attendance history</div>
           <div className="mb-3 flex gap-6 text-sm">
             <div><span className="text-2xl font-semibold">{attendance.total}</span> <span className="text-[var(--color-fg-muted)]">classes total</span></div>
             <div><span className="text-2xl font-semibold">{attendance.sinceLastPromotion}</span> <span className="text-[var(--color-fg-muted)]">since last promotion</span></div>
@@ -284,11 +315,11 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
           {attendance.recent.length === 0 ? (
             <p className="text-xs text-[var(--color-fg-muted)]">No classes recorded yet.</p>
           ) : (
-            <ul className="max-h-48 overflow-auto text-sm">
+            <ul className="max-h-64 overflow-auto text-sm">
               {attendance.recent.map((c, i) => (
                 <li key={i} className="flex justify-between border-t border-[var(--color-border)] py-1 first:border-t-0">
                   <span>{prettyDate(c.date)}</span>
-                  <span className="text-[var(--color-fg-muted)]">{CLASS_TYPE_LABELS[c.classType as keyof typeof CLASS_TYPE_LABELS] ?? c.classType}</span>
+                  <span className="text-[var(--color-fg-muted)]">{c.classType === "legacy" ? "Class" : CLASS_TYPE_LABELS[c.classType as keyof typeof CLASS_TYPE_LABELS] ?? c.classType}</span>
                 </li>
               ))}
             </ul>

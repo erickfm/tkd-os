@@ -12,7 +12,7 @@ import {
 import {
   TRACKS,
   AGE_GROUPS,
-  CLASS_TYPES,
+  STORED_CLASS_TYPES,
   CLASS_GROUPS,
   EVENT_TYPES,
   ATTENDANCE_STATUSES,
@@ -180,7 +180,7 @@ export const attendanceSessions = sqliteTable(
     classTypeIdx: index("attendance_sessions_class_type_idx").on(t.classType),
     classTypeCheck: check(
       "attendance_sessions_class_type_chk",
-      enumCheck("class_type", CLASS_TYPES)
+      enumCheck("class_type", STORED_CLASS_TYPES)
     ),
   })
 );

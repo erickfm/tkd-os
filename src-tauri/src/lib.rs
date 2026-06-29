@@ -1,3 +1,4 @@
+use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_sql::{Migration, MigrationKind};
 
 /// Write text to a path the user explicitly chose via the OS Save dialog.
@@ -10,6 +11,14 @@ fn write_text_file(path: String, contents: String) -> Result<(), String> {
 #[tauri::command]
 fn write_bytes_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
     std::fs::write(&path, bytes).map_err(|e| e.to_string())
+}
+
+/// Open a saved file with the OS default application (so exports open on save).
+#[tauri::command]
+fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -73,7 +82,7 @@ pub fn run() {
                 .add_migrations("sqlite:tkdos.db", migrations)
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![write_text_file, write_bytes_file])
+        .invoke_handler(tauri::generate_handler![write_text_file, write_bytes_file, open_path])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
