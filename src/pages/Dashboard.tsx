@@ -45,7 +45,7 @@ export function DashboardPage() {
             <Stat icon={<Sparkles size={18} />} label="On Trial" value={stats?.onTrial} onClick={() => navigate("/trials")} />
           </div>
 
-          {alerts && (alerts.trialsEndingSoon.length > 0 || alerts.recurringAbsences.length > 0) && (
+          {alerts && (alerts.trialsEndingSoon.length > 0 || alerts.recurringAbsences.length > 0 || alerts.specialTestsUpcoming.length > 0) && (
             <div className="mt-8">
               <h2 className="mb-3 text-lg font-semibold tracking-tight">Alerts</h2>
               <div className="grid gap-4 md:grid-cols-2">
@@ -54,6 +54,14 @@ export function DashboardPage() {
                     {alerts.trialsEndingSoon.map((a) => (
                       <AlertRow key={a.id} onClick={() => navigate("/trials")} name={a.name}
                         detail={`${a.daysLeft} day${a.daysLeft === 1 ? "" : "s"} left`} tone="amber" />
+                    ))}
+                  </AlertCard>
+                )}
+                {alerts.specialTestsUpcoming.length > 0 && (
+                  <AlertCard title={`Early/late testers (${alerts.specialTestsUpcoming.length})`}>
+                    {alerts.specialTestsUpcoming.map((a) => (
+                      <AlertRow key={a.id} onClick={() => navigate("/testing-cycle")} name={a.name}
+                        detail={`${a.timing} · ${prettyDate(a.date)}`} tone="amber" />
                     ))}
                   </AlertCard>
                 )}

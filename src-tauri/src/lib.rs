@@ -72,6 +72,18 @@ pub fn run() {
             sql: include_str!("../migrations/0008_inventory.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 9,
+            description: "event_class_credit",
+            sql: include_str!("../migrations/0009_event_class_credit.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 10,
+            description: "special_testers",
+            sql: include_str!("../migrations/0010_special_testers.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()

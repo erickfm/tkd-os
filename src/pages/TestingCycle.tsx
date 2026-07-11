@@ -4,25 +4,35 @@ import { Award, Download, FileSpreadsheet, Printer, Trash2, UserPlus } from "luc
 import { PageHeader } from "@/components/PageHeader";
 import { BeltBadge } from "@/components/BeltBadge";
 import { Button, EmptyState, Select, TextInput } from "@/components/ui";
+import { StudentSearchAdd } from "@/components/StudentSearchAdd";
 import {
+  addSpecialTester,
   buildBeltLabelsHtml,
   buildCertificateRows,
+  buildSpecialTestersSheetHtml,
   buildTestingCycleCsv,
   getCurrentCycle,
   getCycleCandidates,
   getCycleRegistrations,
+  listSpecialTesters,
+  listStudents,
   promoteCycle,
   registerToTest,
+  removeSpecialTester,
+  setSpecialTesterDate,
+  setSpecialTesterTested,
   unregisterFromTest,
   updateCycle,
   type CandidateRow,
   type PromotionResult,
+  type SpecialTestRow,
+  type StudentRow,
   type TestingRow,
 } from "@/db/repos";
 import type { TestingCycle } from "@/db/schema";
 import { saveTextFile } from "@/lib/download";
 import { exportCertificateData } from "@/lib/certificateExport";
-import { ageFromDob, beltRankOrder, prettyDate } from "@/lib/format";
+import { ageFromDob, beltRankOrder, prettyDate, today } from "@/lib/format";
 
 type CandSort = "first" | "last" | "age" | "belt" | "attendance";
 
@@ -33,6 +43,8 @@ export function TestingCyclePage() {
   const [testingDate, setTestingDate] = useState("");
   const [roster, setRoster] = useState<TestingRow[]>([]);
   const [candidates, setCandidates] = useState<CandidateRow[]>([]);
+  const [special, setSpecial] = useState<SpecialTestRow[]>([]);
+  const [allStudents, setAllStudents] = useState<StudentRow[]>([]);
   const [filter, setFilter] = useState("");
   const [candSort, setCandSort] = useState<CandSort>("last");
   const [candDir, setCandDir] = useState<"asc" | "desc">("asc");
@@ -42,9 +54,16 @@ export function TestingCyclePage() {
   const [exportMsg, setExportMsg] = useState<string | null>(null);
 
   async function loadLists(cycleId: number) {
-    const [r, c] = await Promise.all([getCycleRegistrations(cycleId), getCycleCandidates(cycleId)]);
+    const [r, c, sp, all] = await Promise.all([
+      getCycleRegistrations(cycleId),
+      getCycleCandidates(cycleId),
+      listSpecialTesters(),
+      listStudents(),
+    ]);
     setRoster(r);
     setCandidates(c);
+    setSpecial(sp);
+    setAllStudents(all);
   }
 
   useEffect(() => {
@@ -61,6 +80,38 @@ export function TestingCyclePage() {
       }
     })();
   }, []);
+
+  const addableSpecial = useMemo(() => {
+    const on = new Set(special.map((s) => s.id));
+    return allStudents.filter((s) => s.isActive && !on.has(s.id));
+  }, [special, allStudents]);
+
+  async function addSpecial(studentId: number) {
+    if (!cycle) return;
+    const defaultDate = cycle.testingDate || cycle.endDate || today();
+    await addSpecialTester(studentId, defaultDate);
+    await loadLists(cycle.id);
+  }
+  async function removeSpecial(id: number) {
+    if (!cycle) return;
+    await removeSpecialTester(id);
+    await loadLists(cycle.id);
+  }
+  async function changeSpecialDate(id: number, date: string) {
+    if (!cycle || !date) return;
+    await setSpecialTesterDate(id, date);
+    await loadLists(cycle.id);
+  }
+  async function toggleTested(id: number, tested: boolean) {
+    if (!cycle) return;
+    await setSpecialTesterTested(id, tested);
+    await loadLists(cycle.id);
+  }
+  async function printSpecialSheet() {
+    const html = await buildSpecialTestersSheetHtml();
+    const saved = await saveTextFile(`early_late_testers_${today()}.html`, html, "html");
+    setExportMsg(saved ? "Early/late testers sheet saved — open the file and print." : "Print canceled.");
+  }
 
   async function saveDates() {
     if (!cycle) return;
@@ -173,6 +224,73 @@ export function TestingCyclePage() {
         </label>
         <p className="mb-2 text-xs text-[var(--color-fg-muted)]">Attendance counts classes between the start and the testing date (or end).</p>
       </div>
+
+      {/* Students testing outside the main testing day */}
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-sm font-semibold">Early / late testers ({special.length})</h2>
+        <Button variant="secondary" onClick={printSpecialSheet} disabled={special.length === 0} className="px-2 py-1 text-xs">
+          <Printer size={14} />Print sheet
+        </Button>
+      </div>
+      <StudentSearchAdd students={addableSpecial} onAdd={addSpecial} placeholder="Type a name to add an early/late tester…" />
+      {special.length === 0 ? (
+        <EmptyState title="No early or late testers">Add a student above and set their testing date.</EmptyState>
+      ) : (
+        <div className="mb-6 overflow-hidden rounded-lg border border-[var(--color-border)]">
+          <table className="w-full text-sm">
+            <thead className="bg-[var(--color-surface-2)] text-left text-xs uppercase tracking-wide text-[var(--color-fg-muted)]">
+              <tr>
+                <th className="px-3 py-2 font-medium">Student</th>
+                <th className="px-3 py-2 font-medium">Age</th>
+                <th className="px-3 py-2 font-medium">Belt</th>
+                <th className="px-3 py-2 font-medium">Testing for</th>
+                <th className="px-3 py-2 font-medium text-right">Classes</th>
+                <th className="px-3 py-2 font-medium">Date</th>
+                <th className="px-3 py-2 font-medium">Timing</th>
+                <th className="px-3 py-2 font-medium text-center">Tested</th>
+                <th className="px-3 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {special.map((s) => {
+                const age = ageFromDob(s.dateOfBirth);
+                return (
+                  <tr key={s.specialTesterId} className="border-t border-[var(--color-border)]">
+                    <td className="px-3 py-2">{s.firstName} {s.lastName}</td>
+                    <td className="px-3 py-2">{age ?? "—"}</td>
+                    <td className="px-3 py-2"><BeltBadge rank={s.rank} size="sm" /></td>
+                    <td className="px-3 py-2 text-[var(--color-fg-muted)]">{s.testingFor ?? "(top rank)"}</td>
+                    <td className="px-3 py-2 text-right tabular-nums"><ClassesCell att={s.attendance} min={s.minClasses} met={s.meetsMinimum} /></td>
+                    <td className="px-3 py-2">
+                      <TextInput
+                        type="date"
+                        defaultValue={s.testDate}
+                        onBlur={(e) => e.target.value && e.target.value !== s.testDate && changeSpecialDate(s.specialTesterId, e.target.value)}
+                        className="w-36"
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      <Tag color={s.timing === "Early" ? "#2563eb" : s.timing === "Late" ? "#ea580c" : "var(--color-fg-muted)"}>{s.timing}</Tag>
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      <input
+                        type="checkbox"
+                        checked={s.tested}
+                        onChange={(e) => toggleTested(s.specialTesterId, e.target.checked)}
+                        className="h-4 w-4"
+                        aria-label={`Mark ${s.firstName} ${s.lastName} tested`}
+                      />
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <button onClick={() => removeSpecial(s.specialTesterId)} className="text-[var(--color-fg-muted)] hover:text-red-600" aria-label="Remove"><Trash2 size={15} /></button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {results && (
         <div className="mb-4 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3 text-sm">

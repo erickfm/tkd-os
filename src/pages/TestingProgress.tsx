@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check } from "lucide-react";
+import { Check, Download } from "lucide-react";
 
 import { PageHeader } from "@/components/PageHeader";
 import { BeltBadge } from "@/components/BeltBadge";
+import { Button } from "@/components/ui";
 import {
   listStudentsWithProgress,
   updateProgress,
   type ProgressRow,
 } from "@/db/repos";
 import { beltRankOrder, TRACK_LABEL } from "@/lib/format";
+import { exportTestingProgressXlsx } from "@/lib/testingProgressExport";
 
 type TrackFilter = "all" | "regular" | "tiger";
 type SortKey = "name" | "belt";
@@ -38,6 +40,7 @@ export function TestingProgressPage() {
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [track, setTrack] = useState<TrackFilter>("all");
   const [showInactive, setShowInactive] = useState(false);
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
 
   async function load() {
     try {
@@ -47,6 +50,11 @@ export function TestingProgressPage() {
     }
   }
   useEffect(() => { load(); }, []);
+
+  async function exportXlsx() {
+    const saved = await exportTestingProgressXlsx(filtered);
+    setExportMsg(saved ? "Testing progress saved." : "Export canceled.");
+  }
 
   async function toggle(row: ProgressRow, field: ProgressField) {
     const next = !row[field];
@@ -81,6 +89,7 @@ export function TestingProgressPage() {
       <PageHeader
         title="Testing Progress"
         subtitle={rows ? `${filtered.length} shown of ${rows.length} total` : "Loading…"}
+        actions={<Button variant="secondary" onClick={exportXlsx} disabled={filtered.length === 0}><Download size={16} />Export</Button>}
       />
 
       {error && (
@@ -88,6 +97,7 @@ export function TestingProgressPage() {
           Failed to load students: {error}
         </div>
       )}
+      {exportMsg && <div className="mb-4 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3 text-sm">{exportMsg}</div>}
 
       {!error && (
         <>

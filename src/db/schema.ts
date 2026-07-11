@@ -226,6 +226,8 @@ export const events = sqliteTable(
     location: text("location", { length: 255 }),
     notes: text("notes"),
     isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+    classCredit: integer("class_credit").notNull().default(1),
+    postedAt: text("posted_at"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
@@ -330,6 +332,32 @@ export const testingRegistration = sqliteTable(
   }),
 );
 
+/**
+ * Students testing outside the current cycle's main testing day (early or late).
+ * Deliberately not tied to testing_cycles.id: a cycle row is reused/edited in
+ * place across periods (see testingCycles above), so it isn't a meaningful
+ * per-period key. "Early" vs "Late" is derived by comparing test_date to the
+ * *current* cycle's testing day at query time, not stored.
+ */
+export const specialTesters = sqliteTable(
+  "special_testers",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    studentId: integer("student_id")
+      .notNull()
+      .references(() => students.id),
+    testDate: text("test_date").notNull(),
+    tested: integer("tested", { mode: "boolean" }).notNull().default(false),
+    notes: text("notes"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (t) => ({
+    studentUnique: uniqueIndex("special_testers_student_uniq").on(t.studentId),
+    dateIdx: index("special_testers_date_idx").on(t.testDate),
+  }),
+);
+
 export const inventorySections = sqliteTable("inventory_sections", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
@@ -368,5 +396,6 @@ export type StarterCourse = typeof starterCourses.$inferSelect;
 export type StarterCourseEnrollment = typeof starterCourseEnrollment.$inferSelect;
 export type TestingCycle = typeof testingCycles.$inferSelect;
 export type TestingRegistration = typeof testingRegistration.$inferSelect;
+export type SpecialTester = typeof specialTesters.$inferSelect;
 export type InventorySection = typeof inventorySections.$inferSelect;
 export type InventoryItem = typeof inventoryItems.$inferSelect;

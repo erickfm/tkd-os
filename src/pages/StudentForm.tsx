@@ -3,12 +3,14 @@ import { useEffect, useMemo, useState } from "react";
 import { Drawer } from "@/components/Drawer";
 import { BeltBadge } from "@/components/BeltBadge";
 import { Button, Field, Select, TextInput, Textarea } from "@/components/ui";
-import { BELT_SIZES, CLASS_TYPE_LABELS } from "@/db/enums";
+import { BELT_SIZES } from "@/db/enums";
 import type { BeltRank } from "@/db/schema";
 import {
   createStudent,
+  deleteStudentPermanently,
   getProgress,
   getStudentAttendance,
+  getStudentDeleteImpact,
   listRankHistory,
   setStudentActive,
   updateProgress,
@@ -137,6 +139,9 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
       const payload = { ...form, beltRankId, joinDate: form.joinDate || today() };
       if (editing) await updateStudent(editing.id, payload);
       else await createStudent(payload);
+      // Force a re-seed next time the drawer opens — otherwise "new" stays
+      // seeded and the next "Add student" silently reopens with this data.
+      setSeededFor(null);
       onSaved();
       onClose();
     } catch (e) {
@@ -158,6 +163,24 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
     }
   }
 
+  async function deletePermanently() {
+    if (!editing) return;
+    const impact = await getStudentDeleteImpact(editing.id);
+    const total = Object.values(impact).reduce((sum, n) => sum + n, 0);
+    const detail = total > 0
+      ? ` This also permanently erases ${total} related record${total === 1 ? "" : "s"} (attendance, promotions, event/testing registrations).`
+      : "";
+    if (!confirm(`Permanently delete ${editing.firstName} ${editing.lastName}? This cannot be undone.${detail}\n\nOnly do this for an accidental duplicate — use Deactivate for anyone who actually left.`)) return;
+    setSaving(true);
+    try {
+      await deleteStudentPermanently(editing.id);
+      onSaved();
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <Drawer
       open={open}
@@ -166,9 +189,14 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
       footer={
         <div className="flex items-center justify-between">
           {editing ? (
-            <Button variant={editing.isActive ? "danger" : "secondary"} onClick={toggleActive} disabled={saving}>
-              {editing.isActive ? "Deactivate" : "Reactivate"}
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button variant={editing.isActive ? "danger" : "secondary"} onClick={toggleActive} disabled={saving}>
+                {editing.isActive ? "Deactivate" : "Reactivate"}
+              </Button>
+              <Button variant="ghost" onClick={deletePermanently} disabled={saving} className="text-red-600 hover:bg-red-500/10" title="Only for accidental duplicates — permanently erases this student and cannot be undone.">
+                Delete permanently
+              </Button>
+            </div>
           ) : <span />}
           <div className="flex gap-2">
             <Button variant="ghost" onClick={onClose} disabled={saving}>Cancel</Button>
@@ -319,7 +347,7 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
               {attendance.recent.map((c, i) => (
                 <li key={i} className="flex justify-between border-t border-[var(--color-border)] py-1 first:border-t-0">
                   <span>{prettyDate(c.date)}</span>
-                  <span className="text-[var(--color-fg-muted)]">{c.classType === "legacy" ? "Class" : CLASS_TYPE_LABELS[c.classType as keyof typeof CLASS_TYPE_LABELS] ?? c.classType}</span>
+                  <span className="text-[var(--color-fg-muted)]">{c.label}</span>
                 </li>
               ))}
             </ul>

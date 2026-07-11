@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, gte, inArray, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 
 import { getDb } from "./client";
 import {
@@ -10,6 +10,7 @@ import {
   inventoryItems,
   inventorySections,
   rankHistory,
+  specialTesters,
   starterCourseEnrollment,
   starterCourses,
   studentProgress,
@@ -18,7 +19,8 @@ import {
   testingRegistration,
 } from "./schema";
 import type { BeltRank, InventoryItem, InventorySection, Student, TestingCycle } from "./schema";
-import { ageFromDob, beltRankOrder, today } from "@/lib/format";
+import { ageFromDob, beltRankOrder, prettyDate, today } from "@/lib/format";
+import { CLASS_TYPE_LABELS } from "./enums";
 
 // ----------------------------------------------------------------------------
 // Belt ranks
@@ -217,6 +219,53 @@ export async function setStudentActive(
     .where(eq(students.id, id));
 }
 
+export interface StudentDeleteImpact {
+  attendanceRecords: number;
+  rankHistory: number;
+  eventRegistrations: number;
+  testingRegistrations: number;
+  specialTesterEntries: number;
+  starterCourseEnrollments: number;
+}
+
+/** Counts of related rows that a permanent delete would also erase — for a confirmation prompt. */
+export async function getStudentDeleteImpact(studentId: number): Promise<StudentDeleteImpact> {
+  const db = await getDb();
+  const [a] = await db.select({ n: sql<number>`count(*)` }).from(attendanceRecords).where(eq(attendanceRecords.studentId, studentId));
+  const [r] = await db.select({ n: sql<number>`count(*)` }).from(rankHistory).where(eq(rankHistory.studentId, studentId));
+  const [e] = await db.select({ n: sql<number>`count(*)` }).from(eventRoster).where(eq(eventRoster.studentId, studentId));
+  const [t] = await db.select({ n: sql<number>`count(*)` }).from(testingRegistration).where(eq(testingRegistration.studentId, studentId));
+  const [sp] = await db.select({ n: sql<number>`count(*)` }).from(specialTesters).where(eq(specialTesters.studentId, studentId));
+  const [c] = await db.select({ n: sql<number>`count(*)` }).from(starterCourseEnrollment).where(eq(starterCourseEnrollment.studentId, studentId));
+  return {
+    attendanceRecords: Number(a?.n ?? 0),
+    rankHistory: Number(r?.n ?? 0),
+    eventRegistrations: Number(e?.n ?? 0),
+    testingRegistrations: Number(t?.n ?? 0),
+    specialTesterEntries: Number(sp?.n ?? 0),
+    starterCourseEnrollments: Number(c?.n ?? 0),
+  };
+}
+
+/**
+ * Permanently and irreversibly delete a student and every related record
+ * (attendance, promotion history, event/testing/course registrations,
+ * progress). There is no undo — this exists only to clean up accidental
+ * duplicate students. Normal removal is `setStudentActive(id, false)`
+ * (soft-delete), which keeps history intact; prefer that for everything else.
+ */
+export async function deleteStudentPermanently(studentId: number): Promise<void> {
+  const db = await getDb();
+  await db.delete(attendanceRecords).where(eq(attendanceRecords.studentId, studentId));
+  await db.delete(rankHistory).where(eq(rankHistory.studentId, studentId));
+  await db.delete(eventRoster).where(eq(eventRoster.studentId, studentId));
+  await db.delete(testingRegistration).where(eq(testingRegistration.studentId, studentId));
+  await db.delete(specialTesters).where(eq(specialTesters.studentId, studentId));
+  await db.delete(starterCourseEnrollment).where(eq(starterCourseEnrollment.studentId, studentId));
+  await db.delete(studentProgress).where(eq(studentProgress.studentId, studentId));
+  await db.delete(students).where(eq(students.id, studentId));
+}
+
 // ----------------------------------------------------------------------------
 // Progress (stripes + permission to test)
 // ----------------------------------------------------------------------------
@@ -374,11 +423,37 @@ export interface EventInput {
   eventType: string;
   location: string | null;
   notes: string | null;
+  classCredit: number;
 }
 
+/** Events not yet posted (the active/upcoming list). */
 export async function listEvents() {
   const db = await getDb();
-  return db.select().from(events).orderBy(desc(events.eventDate));
+  return db.select().from(events).where(isNull(events.postedAt)).orderBy(desc(events.eventDate));
+}
+
+/** Events already posted (credited to students' class counts) — history view. */
+export async function listPostedEvents() {
+  const db = await getDb();
+  return db.select().from(events).where(isNotNull(events.postedAt)).orderBy(desc(events.eventDate));
+}
+
+/** Credit every rostered student the event's class_credit and remove it from the active list. */
+export async function postEvent(eventId: number): Promise<void> {
+  const db = await getDb();
+  await db
+    .update(events)
+    .set({ postedAt: sql`CURRENT_TIMESTAMP`, updatedAt: sql`CURRENT_TIMESTAMP` })
+    .where(and(eq(events.id, eventId), isNull(events.postedAt)));
+}
+
+/** Undo a post — removes the credit again. */
+export async function unpostEvent(eventId: number): Promise<void> {
+  const db = await getDb();
+  await db
+    .update(events)
+    .set({ postedAt: null, updatedAt: sql`CURRENT_TIMESTAMP` })
+    .where(eq(events.id, eventId));
 }
 
 export async function createEvent(input: EventInput): Promise<number> {
@@ -621,7 +696,27 @@ async function presentCountsInRange(
       ),
     )
     .groupBy(attendanceRecords.studentId);
-  return new Map(rows.map((r) => [r.studentId, Number(r.n)]));
+
+  const eventRows = await db
+    .select({
+      studentId: eventRoster.studentId,
+      n: sql<number>`sum(${events.classCredit})`,
+    })
+    .from(eventRoster)
+    .innerJoin(events, eq(eventRoster.eventId, events.id))
+    .where(
+      and(
+        inArray(eventRoster.studentId, studentIds),
+        isNotNull(events.postedAt),
+        gte(events.eventDate, start),
+        lte(events.eventDate, end),
+      ),
+    )
+    .groupBy(eventRoster.studentId);
+
+  const map = new Map<number, number>(rows.map((r) => [r.studentId, Number(r.n)]));
+  for (const r of eventRows) map.set(r.studentId, (map.get(r.studentId) ?? 0) + Number(r.n));
+  return map;
 }
 
 export interface CandidateRow extends StudentRow {
@@ -826,6 +921,143 @@ export async function buildCertificateRows(cycleId: number): Promise<Certificate
 }
 
 // ----------------------------------------------------------------------------
+// Early / late testers (students testing outside the cycle's main testing day)
+// ----------------------------------------------------------------------------
+
+export interface SpecialTestRow extends StudentRow {
+  specialTesterId: number;
+  testDate: string;
+  tested: boolean;
+  timing: "Early" | "Late" | "Same day";
+  testingFor: string | null;
+  attendance: number;
+  minClasses: number;
+  meetsMinimum: boolean;
+}
+
+/** Add a student to the early/late list, or update their date if already on it. */
+export async function addSpecialTester(studentId: number, testDate: string): Promise<void> {
+  const db = await getDb();
+  const [existing] = await db.select().from(specialTesters).where(eq(specialTesters.studentId, studentId));
+  if (existing) {
+    await db
+      .update(specialTesters)
+      .set({ testDate, updatedAt: sql`CURRENT_TIMESTAMP` })
+      .where(eq(specialTesters.id, existing.id));
+  } else {
+    await db.insert(specialTesters).values({ studentId, testDate });
+  }
+}
+
+export async function setSpecialTesterDate(id: number, testDate: string): Promise<void> {
+  const db = await getDb();
+  await db
+    .update(specialTesters)
+    .set({ testDate, updatedAt: sql`CURRENT_TIMESTAMP` })
+    .where(eq(specialTesters.id, id));
+}
+
+export async function setSpecialTesterTested(id: number, tested: boolean): Promise<void> {
+  const db = await getDb();
+  await db
+    .update(specialTesters)
+    .set({ tested, updatedAt: sql`CURRENT_TIMESTAMP` })
+    .where(eq(specialTesters.id, id));
+}
+
+export async function removeSpecialTester(id: number): Promise<void> {
+  const db = await getDb();
+  await db.delete(specialTesters).where(eq(specialTesters.id, id));
+}
+
+/** Everyone on the early/late list, with belt/attendance context, soonest date first. */
+export async function listSpecialTesters(): Promise<SpecialTestRow[]> {
+  const db = await getDb();
+  const rows = await db
+    .select({
+      // specialTesters and students both have id/notes/created_at/updated_at —
+      // alias these explicitly (see rankCols above) instead of nesting the
+      // whole table, or the proxy's positional row-mapping silently corrupts.
+      stId: sql<number>`${specialTesters.id}`.as("st_id"),
+      stTestDate: sql<string>`${specialTesters.testDate}`.as("st_test_date"),
+      stTested: sql<boolean>`${specialTesters.tested}`.as("st_tested"),
+      s: students,
+      ...rankCols,
+      ptt: studentProgress.permissionToTest,
+    })
+    .from(specialTesters)
+    .innerJoin(students, eq(specialTesters.studentId, students.id))
+    .innerJoin(beltRanks, eq(students.beltRankId, beltRanks.id))
+    .leftJoin(studentProgress, eq(studentProgress.studentId, students.id))
+    .orderBy(asc(specialTesters.testDate));
+  if (rows.length === 0) return [];
+
+  const cycle = await getCurrentCycle();
+  const mainDay = cycle.testingDate ?? cycle.endDate;
+  const ranks = await listBeltRanks();
+  const rankById = new Map(ranks.map((r) => [r.id, r]));
+
+  const result: SpecialTestRow[] = [];
+  for (const x of rows) {
+    const rank = toRank(x);
+    const next = rank.nextRankId ? rankById.get(rank.nextRankId) : null;
+    const attendanceMap = await presentCountsInRange([x.s.id], cycle.startDate, x.stTestDate);
+    const minClasses = minClassesToTest(rank);
+    const attendance = attendanceMap.get(x.s.id) ?? 0;
+    result.push({
+      ...x.s,
+      rank,
+      permissionToTest: Boolean(x.ptt),
+      specialTesterId: x.stId,
+      testDate: x.stTestDate,
+      tested: Boolean(x.stTested),
+      timing: x.stTestDate < mainDay ? "Early" : x.stTestDate > mainDay ? "Late" : "Same day",
+      testingFor: next ? next.name : null,
+      attendance,
+      minClasses,
+      meetsMinimum: attendance >= minClasses,
+    });
+  }
+  return result;
+}
+
+/** Print-ready HTML sheet: name, age, belt, testing-for, date, timing, and a checkbox to mark tested. */
+export async function buildSpecialTestersSheetHtml(): Promise<string> {
+  const rows = await listSpecialTesters();
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const tr = (s: SpecialTestRow) => `
+    <tr>
+      <td>${esc(`${s.firstName} ${s.lastName}`)}</td>
+      <td>${ageFromDob(s.dateOfBirth) ?? "—"}</td>
+      <td>${esc(s.rank.name)}</td>
+      <td>${esc(s.testingFor ?? "(top rank)")}</td>
+      <td>${esc(prettyDate(s.testDate))}</td>
+      <td>${s.timing}</td>
+      <td class="box"></td>
+    </tr>`;
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>Early / Late Testers</title>
+<style>
+  @page { size: letter; margin: 0.6in; }
+  body { font-family: Arial, Helvetica, sans-serif; }
+  h1 { font-size: 16pt; margin: 0 0 4px; }
+  p.sub { margin: 0 0 16px; color: #555; font-size: 10pt; }
+  table { width: 100%; border-collapse: collapse; font-size: 10.5pt; }
+  th, td { border: 1px solid #999; padding: 6px 8px; text-align: left; }
+  th { background: #eee; }
+  td.box { width: 0.4in; }
+</style></head>
+<body>
+  <h1>Early / Late Testers</h1>
+  <p class="sub">Generated ${esc(prettyDate(today()))}</p>
+  <table>
+    <thead><tr><th>Name</th><th>Age</th><th>Current Belt</th><th>Testing For</th><th>Date</th><th>Timing</th><th>Tested</th></tr></thead>
+    <tbody>${rows.length ? rows.map(tr).join("") : `<tr><td colspan="7">No early/late testers.</td></tr>`}</tbody>
+  </table>
+</body></html>`;
+}
+
+// ----------------------------------------------------------------------------
 // Attendance
 // ----------------------------------------------------------------------------
 
@@ -970,29 +1202,50 @@ export async function setAttendance(
 export interface StudentAttendanceSummary {
   total: number;
   sinceLastPromotion: number;
-  recent: { date: string; classType: string }[];
+  recent: { date: string; label: string }[];
 }
 
-/** A student's present-class history (most recent first) + totals. */
+/** A student's present-class + posted-event history (most recent first) + totals. */
 export async function getStudentAttendance(studentId: number): Promise<StudentAttendanceSummary> {
   const db = await getDb();
-  const rows = await db
+  const classRows = await db
     .select({ date: attendanceSessions.sessionDate, classType: attendanceSessions.classType })
     .from(attendanceRecords)
     .innerJoin(attendanceSessions, eq(attendanceRecords.sessionId, attendanceSessions.id))
-    .where(and(eq(attendanceRecords.studentId, studentId), eq(attendanceRecords.status, "present")))
-    .orderBy(desc(attendanceSessions.sessionDate));
+    .where(and(eq(attendanceRecords.studentId, studentId), eq(attendanceRecords.status, "present")));
+
+  const eventRows = await db
+    .select({ date: events.eventDate, name: events.name, credit: events.classCredit })
+    .from(eventRoster)
+    .innerJoin(events, eq(eventRoster.eventId, events.id))
+    .where(and(eq(eventRoster.studentId, studentId), isNotNull(events.postedAt)));
+
+  const combined = [
+    ...classRows.map((r) => ({
+      date: r.date,
+      credit: 1,
+      label: r.classType === "legacy" ? "Class" : CLASS_TYPE_LABELS[r.classType as ClassType] ?? r.classType,
+    })),
+    ...eventRows.map((r) => ({
+      date: r.date,
+      credit: r.credit,
+      label: r.credit > 1 ? `${r.name} (+${r.credit} classes)` : r.name,
+    })),
+  ].sort((a, b) => b.date.localeCompare(a.date));
+
+  const total = combined.reduce((sum, r) => sum + r.credit, 0);
   const sinceLastPromotion = await classesSincePromotion(studentId);
-  return { total: rows.length, sinceLastPromotion, recent: rows };
+  return { total, sinceLastPromotion, recent: combined.map(({ date, label }) => ({ date, label })) };
 }
 
-/** Count of present classes since the student's last promotion. */
+/** Count of present classes + posted-event credit since the student's last promotion. */
 export async function classesSincePromotion(studentId: number): Promise<number> {
   const db = await getDb();
   const [last] = await db
     .select({ d: sql<string>`max(${rankHistory.promotionDate})` })
     .from(rankHistory)
     .where(eq(rankHistory.studentId, studentId));
+
   const conds = [
     eq(attendanceRecords.studentId, studentId),
     eq(attendanceRecords.status, "present"),
@@ -1006,7 +1259,16 @@ export async function classesSincePromotion(studentId: number): Promise<number> 
       eq(attendanceRecords.sessionId, attendanceSessions.id),
     )
     .where(and(...conds));
-  return Number(row?.n ?? 0);
+
+  const eventConds = [eq(eventRoster.studentId, studentId), isNotNull(events.postedAt)];
+  if (last?.d) eventConds.push(gt(events.eventDate, last.d));
+  const [eventRow] = await db
+    .select({ n: sql<number>`sum(${events.classCredit})` })
+    .from(eventRoster)
+    .innerJoin(events, eq(eventRoster.eventId, events.id))
+    .where(and(...eventConds));
+
+  return Number(row?.n ?? 0) + Number(eventRow?.n ?? 0);
 }
 
 // ----------------------------------------------------------------------------
@@ -1124,6 +1386,7 @@ export async function listTrialStudents(): Promise<TrialRow[]> {
 export interface DashboardAlerts {
   trialsEndingSoon: { id: number; name: string; daysLeft: number }[];
   recurringAbsences: { id: number; name: string; lastPresent: string }[];
+  specialTestsUpcoming: { id: number; name: string; date: string; timing: "Early" | "Late" | "Same day" }[];
 }
 
 /** Trials ending within a week + active students who attended before but not in 14 days. */
@@ -1151,7 +1414,11 @@ export async function getDashboardAlerts(): Promise<DashboardAlerts> {
     .map((x) => ({ id: x.s.id, name: `${x.s.firstName} ${x.s.lastName}`, lastPresent: x.last as string }))
     .sort((a, b) => a.lastPresent.localeCompare(b.lastPresent));
 
-  return { trialsEndingSoon, recurringAbsences };
+  const specialTestsUpcoming = (await listSpecialTesters())
+    .filter((s) => !s.tested)
+    .map((s) => ({ id: s.specialTesterId, name: `${s.firstName} ${s.lastName}`, date: s.testDate, timing: s.timing }));
+
+  return { trialsEndingSoon, recurringAbsences, specialTestsUpcoming };
 }
 
 // ----------------------------------------------------------------------------

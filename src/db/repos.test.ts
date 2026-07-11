@@ -24,9 +24,19 @@ import {
   deleteInventoryItem,
   getOrCreateSession,
   getStudentAttendance,
+  addSpecialTester,
+  deleteStudentPermanently,
+  getStudentDeleteImpact,
+  listEvents,
   listInventory,
+  listPostedEvents,
+  listSpecialTesters,
   listTrialStudents,
   updateInventoryItem,
+  postEvent,
+  promoteStudent,
+  removeSpecialTester,
+  setSpecialTesterTested,
   setStudentActive,
   setTrial,
   listBeltRanks,
@@ -37,6 +47,7 @@ import {
   registerToTest,
   setAttendance,
   studentsForClass,
+  unpostEvent,
   unregisterFromTest,
   updateCycle,
   updateProgress,
@@ -63,6 +74,8 @@ beforeAll(() => {
   sqlite.exec(readFileSync(join(migrationsDir, "0006_testing_date.sql"), "utf8"));
   sqlite.exec(readFileSync(join(migrationsDir, "0007_trial_start.sql"), "utf8"));
   sqlite.exec(readFileSync(join(migrationsDir, "0008_inventory.sql"), "utf8"));
+  sqlite.exec(readFileSync(join(migrationsDir, "0009_event_class_credit.sql"), "utf8"));
+  sqlite.exec(readFileSync(join(migrationsDir, "0010_special_testers.sql"), "utf8"));
 
   const blackId = (sqlite
     .prepare("SELECT id FROM belt_ranks WHERE track='regular' AND degree IS NOT NULL ORDER BY sort_order LIMIT 1")
@@ -469,9 +482,9 @@ describe("upcoming agenda (events + testings, next 4 weeks)", () => {
     return d.toISOString().slice(0, 10);
   };
   it("includes events within 4 weeks and excludes those beyond, soonest first", async () => {
-    await createEvent({ name: "Near Seminar", eventDate: shift(8), eventTime: null, eventType: "Seminar", location: null, notes: null });
-    await createEvent({ name: "Far Camp", eventDate: shift(45), eventTime: null, eventType: "Camp", location: null, notes: null });
-    await createEvent({ name: "Past Demo", eventDate: shift(-3), eventTime: null, eventType: "Demo", location: null, notes: null });
+    await createEvent({ name: "Near Seminar", eventDate: shift(8), eventTime: null, eventType: "Seminar", location: null, notes: null, classCredit: 1 });
+    await createEvent({ name: "Far Camp", eventDate: shift(45), eventTime: null, eventType: "Camp", location: null, notes: null, classCredit: 1 });
+    await createEvent({ name: "Past Demo", eventDate: shift(-3), eventTime: null, eventType: "Demo", location: null, notes: null, classCredit: 1 });
 
     const agenda = await getUpcomingAgenda(28);
     const names = agenda.map((i) => i.name);
@@ -490,7 +503,7 @@ describe("event roster export", () => {
     const id = await createStudent(makeInput({ firstName: "Seminar", lastName: "Goer", beltRankId: rank.id }));
     const eventId = await createEvent({
       name: "Spring Seminar", eventDate: "2025-03-01", eventTime: null,
-      eventType: "Seminar", location: null, notes: null,
+      eventType: "Seminar", location: null, notes: null, classCredit: 1,
     });
     await addToRoster(eventId, id);
 
@@ -509,12 +522,124 @@ describe("event roster export", () => {
     const tiger = await createStudent(makeInput({ firstName: "Aaa", lastName: "Tigerkid", track: "tiger", beltRankId: tigerWhite.id }));
     const jr = await createStudent(makeInput({ firstName: "Bbb", lastName: "Juniorkid", track: "regular", ageGroup: "jr", beltRankId: jrWhite.id }));
     const adult = await createStudent(makeInput({ firstName: "Ccc", lastName: "Adultone", track: "regular", ageGroup: "adult", beltRankId: jrWhite.id }));
-    const eventId = await createEvent({ name: "Order Test", eventDate: "2025-04-01", eventTime: null, eventType: "Demo", location: null, notes: null });
+    const eventId = await createEvent({ name: "Order Test", eventDate: "2025-04-01", eventTime: null, eventType: "Demo", location: null, notes: null, classCredit: 1 });
     for (const id of [adult, jr, tiger]) await addToRoster(eventId, id); // added out of group order
 
     const order = (await buildEventRosterCsv(eventId)).split("\r\n").slice(1).map((r) => r.split(",")[0]);
     expect(order.indexOf("Aaa Tigerkid")).toBeLessThan(order.indexOf("Bbb Juniorkid"));
     expect(order.indexOf("Bbb Juniorkid")).toBeLessThan(order.indexOf("Ccc Adultone"));
+  });
+});
+
+describe("event class credit", () => {
+  it("posted event credit counts toward cycle attendance, student totals, and since-last-promotion; unposting reverses it", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "Credit", lastName: "Winner", beltRankId: rank.id }));
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-01-01", "2025-12-31", null);
+
+    const eventId = await createEvent({
+      name: "Summer Camp", eventDate: "2025-06-01", eventTime: null,
+      eventType: "Camp", location: null, notes: null, classCredit: 2,
+    });
+    await addToRoster(eventId, id);
+
+    // Not posted yet: no credit anywhere, and it's still in the upcoming list.
+    expect((await listEvents()).some((e) => e.id === eventId)).toBe(true);
+    expect((await listPostedEvents()).some((e) => e.id === eventId)).toBe(false);
+    expect((await getCycleCandidates(cycle.id)).find((c) => c.id === id)!.attendanceThisCycle).toBe(0);
+    expect((await getStudentAttendance(id)).total).toBe(0);
+
+    await postEvent(eventId);
+
+    expect((await listEvents()).some((e) => e.id === eventId)).toBe(false);
+    expect((await listPostedEvents()).some((e) => e.id === eventId)).toBe(true);
+    expect((await getCycleCandidates(cycle.id)).find((c) => c.id === id)!.attendanceThisCycle).toBe(2);
+
+    const att = await getStudentAttendance(id);
+    expect(att.total).toBe(2);
+    expect(att.sinceLastPromotion).toBe(2);
+    expect(att.recent[0]).toEqual({ date: "2025-06-01", label: "Summer Camp (+2 classes)" });
+
+    await unpostEvent(eventId);
+    expect((await listEvents()).some((e) => e.id === eventId)).toBe(true);
+    expect((await getCycleCandidates(cycle.id)).find((c) => c.id === id)!.attendanceThisCycle).toBe(0);
+    expect((await getStudentAttendance(id)).total).toBe(0);
+  });
+});
+
+describe("early/late testers", () => {
+  it("tracks a custom test date separately from the main cycle roster, labels timing, counts attendance through their date, and surfaces in alerts until checked off", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "Early", lastName: "Bird", beltRankId: rank.id }));
+    const cycle = await getCurrentCycle(); // dates set to 2025-01-01..2025-12-31, testingDate null by earlier tests
+
+    const s1 = await getOrCreateSession("2025-02-01", "adult");
+    await setAttendance(s1, id, "present");
+    const s2 = await getOrCreateSession("2025-04-01", "adult"); // after the early test date — must not count
+    await setAttendance(s2, id, "present");
+
+    await addSpecialTester(id, "2025-03-01"); // before cycle end (2025-12-31) => Early
+
+    let rows = await listSpecialTesters();
+    let row = rows.find((r) => r.id === id)!;
+    expect(row.timing).toBe("Early");
+    expect(row.tested).toBe(false);
+    expect(row.attendance).toBe(1); // only the Feb session, not the April one
+
+    // Doesn't leak into the main cycle roster/candidate attendance.
+    expect((await getCycleCandidates(cycle.id)).find((c) => c.id === id)!.attendanceThisCycle).toBe(2);
+
+    let alerts = await getDashboardAlerts();
+    expect(alerts.specialTestsUpcoming.some((a) => a.id === row.specialTesterId)).toBe(true);
+
+    // Re-adding the same student updates the date instead of duplicating.
+    await addSpecialTester(id, "2026-01-15"); // after cycle end (2025-12-31) => Late
+    rows = await listSpecialTesters();
+    expect(rows.filter((r) => r.id === id).length).toBe(1);
+    row = rows.find((r) => r.id === id)!;
+    expect(row.timing).toBe("Late");
+
+    await setSpecialTesterTested(row.specialTesterId, true);
+    row = (await listSpecialTesters()).find((r) => r.id === id)!;
+    expect(row.tested).toBe(true);
+    alerts = await getDashboardAlerts();
+    expect(alerts.specialTestsUpcoming.some((a) => a.id === row.specialTesterId)).toBe(false); // checked off, no longer an alert
+
+    await removeSpecialTester(row.specialTesterId);
+    expect((await listSpecialTesters()).some((r) => r.id === id)).toBe(false);
+  });
+});
+
+describe("permanent student delete", () => {
+  it("erases the student and every related record (attendance, promotions, rosters, registrations)", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "Dupe", lastName: "Student", beltRankId: rank.id }));
+
+    const session = await getOrCreateSession("2025-07-01", "adult");
+    await setAttendance(session, id, "present");
+    await promoteStudent(id, {}); // one rank_history row
+    const eventId = await createEvent({ name: "Delete Test Event", eventDate: "2025-07-05", eventTime: null, eventType: "Demo", location: null, notes: null, classCredit: 1 });
+    await addToRoster(eventId, id);
+    const cycle = await getCurrentCycle();
+    await registerToTest(cycle.id, id);
+    await addSpecialTester(id, "2025-08-01");
+
+    const impact = await getStudentDeleteImpact(id);
+    expect(impact.attendanceRecords).toBe(1);
+    expect(impact.rankHistory).toBe(1);
+    expect(impact.eventRegistrations).toBe(1);
+    expect(impact.testingRegistrations).toBe(1);
+    expect(impact.specialTesterEntries).toBe(1);
+
+    await deleteStudentPermanently(id);
+
+    expect((await listStudents()).some((s) => s.id === id)).toBe(false);
+    expect((await getCycleCandidates(cycle.id)).some((s) => s.id === id)).toBe(false);
+    expect((await listSpecialTesters()).some((s) => s.id === id)).toBe(false);
+    // No leftover rows to violate uniqueness if a same-named student is added later.
+    const id2 = await createStudent(makeInput({ firstName: "Dupe", lastName: "Student", beltRankId: rank.id }));
+    expect((await getStudentDeleteImpact(id2)).attendanceRecords).toBe(0);
   });
 });
 
