@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
+import { Pencil } from "lucide-react";
 
 import { Drawer } from "@/components/Drawer";
 import { BeltBadge } from "@/components/BeltBadge";
 import { Button, Field, Select, TextInput, Textarea } from "@/components/ui";
-import { BELT_SIZES } from "@/db/enums";
+import { BELT_SIZES, NC_REASON_LABELS, type NcReason } from "@/db/enums";
 import type { BeltRank } from "@/db/schema";
 import {
   createStudent,
@@ -11,9 +12,11 @@ import {
   getProgress,
   getStudentAttendance,
   getStudentDeleteImpact,
+  listNoChangeHistory,
   listRankHistory,
   setStudentActive,
   updateProgress,
+  updateRankHistory,
   updateStudent,
   type StudentAttendanceSummary,
   type StudentInput,
@@ -22,6 +25,7 @@ import {
 import { ageFromDob, prettyDate, today } from "@/lib/format";
 
 type RankHistoryEntry = Awaited<ReturnType<typeof listRankHistory>>[number];
+type NoChangeEntry = Awaited<ReturnType<typeof listNoChangeHistory>>[number];
 
 type ProgressState = {
   greenStripe: boolean;
@@ -111,6 +115,56 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
     if (!open || !editing) { setHistory(null); return; }
     listRankHistory(editing.id).then(setHistory);
   }, [open, editing]);
+
+  const [ncHistory, setNcHistory] = useState<NoChangeEntry[] | null>(null);
+  useEffect(() => {
+    if (!open || !editing) { setNcHistory(null); return; }
+    listNoChangeHistory(editing.id).then(setNcHistory);
+  }, [open, editing]);
+
+  const [editingHistoryId, setEditingHistoryId] = useState<number | null>(null);
+  const [historyEditDate, setHistoryEditDate] = useState("");
+  const [historyEditRankId, setHistoryEditRankId] = useState<number>(0);
+  const [historyEditNote, setHistoryEditNote] = useState("");
+  const [historyEditSaving, setHistoryEditSaving] = useState(false);
+  const [historyEditError, setHistoryEditError] = useState<string | null>(null);
+
+  function openHistoryEdit(row: RankHistoryEntry) {
+    setEditingHistoryId(row.h.id);
+    setHistoryEditDate(row.h.promotionDate);
+    setHistoryEditRankId(row.h.toRankId);
+    setHistoryEditNote(row.h.note ?? "");
+    setHistoryEditError(null);
+  }
+  function cancelHistoryEdit() {
+    setEditingHistoryId(null);
+    setHistoryEditError(null);
+  }
+  async function saveHistoryEdit() {
+    if (editingHistoryId == null) return;
+    setHistoryEditSaving(true);
+    setHistoryEditError(null);
+    try {
+      await updateRankHistory(editingHistoryId, {
+        promotionDate: historyEditDate,
+        toRankId: historyEditRankId,
+        note: historyEditNote.trim() || null,
+      });
+      const fresh = await listRankHistory(editing!.id);
+      setHistory(fresh);
+      // If this was the student's most recent promotion, their current belt
+      // just changed too — keep the belt-rank field in the form in sync.
+      if (fresh[0]?.h.id === editingHistoryId) {
+        set("beltRankId", fresh[0].h.toRankId);
+      }
+      setEditingHistoryId(null);
+      onSaved();
+    } catch (e) {
+      setHistoryEditError(String(e));
+    } finally {
+      setHistoryEditSaving(false);
+    }
+  }
 
   const ranksForTrack = useMemo(
     () => ranks.filter((r) => r.track === form.track),
@@ -318,14 +372,40 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
           {history.length === 0 ? (
             <p className="text-xs text-[var(--color-fg-muted)]">No promotions recorded yet.</p>
           ) : (
-            <ul className="max-h-64 overflow-auto text-sm">
+            <ul className="max-h-80 overflow-auto text-sm">
               {history.map((row) => (
-                <li key={row.h.id} className="flex items-center justify-between gap-3 border-t border-[var(--color-border)] py-1.5 first:border-t-0">
-                  <span className="shrink-0 text-[var(--color-fg-muted)]">{prettyDate(row.h.promotionDate)}</span>
-                  <span className="flex min-w-0 items-center gap-2">
-                    <BeltBadge rank={row.to} size="sm" />
-                    {row.h.note && <span className="truncate text-xs text-[var(--color-fg-muted)]" title={row.h.note}>{row.h.note}</span>}
-                  </span>
+                <li key={row.h.id} className="border-t border-[var(--color-border)] py-1.5 first:border-t-0">
+                  {editingHistoryId === row.h.id ? (
+                    <div className="space-y-2 py-1">
+                      {historyEditError && <p className="text-xs text-red-600">{historyEditError}</p>}
+                      <div className="grid grid-cols-2 gap-x-2">
+                        <TextInput type="date" value={historyEditDate} onChange={(e) => setHistoryEditDate(e.target.value)} className="text-xs" />
+                        <Select value={historyEditRankId} onChange={(e) => setHistoryEditRankId(Number(e.target.value))} className="text-xs">
+                          {ranks.filter((r) => r.track === row.to.track).map((r) => (
+                            <option key={r.id} value={r.id}>{r.name}</option>
+                          ))}
+                        </Select>
+                      </div>
+                      <TextInput value={historyEditNote} onChange={(e) => setHistoryEditNote(e.target.value)} placeholder="Note (optional)" className="text-xs" />
+                      <div className="flex justify-end gap-2">
+                        <Button variant="ghost" onClick={cancelHistoryEdit} disabled={historyEditSaving} className="px-2 py-1 text-xs">Cancel</Button>
+                        <Button variant="primary" onClick={saveHistoryEdit} disabled={historyEditSaving} className="px-2 py-1 text-xs">
+                          {historyEditSaving ? "Saving…" : "Save"}
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="shrink-0 text-[var(--color-fg-muted)]">{prettyDate(row.h.promotionDate)}</span>
+                      <span className="flex min-w-0 flex-1 items-center gap-2">
+                        <BeltBadge rank={row.to} size="sm" />
+                        {row.h.note && <span className="truncate text-xs text-[var(--color-fg-muted)]" title={row.h.note}>{row.h.note}</span>}
+                      </span>
+                      <button onClick={() => openHistoryEdit(row)} className="shrink-0 text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]" aria-label="Edit">
+                        <Pencil size={13} />
+                      </button>
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
@@ -333,12 +413,33 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
         </div>
       )}
 
+      {editing && ncHistory && ncHistory.length > 0 && (
+        <div className="mt-3 rounded-md border border-[var(--color-border)] p-3">
+          <div className="mb-2 text-sm font-medium">No Change history ({ncHistory.length})</div>
+          <ul className="max-h-64 overflow-auto text-sm">
+            {ncHistory.map((row) => (
+              <li key={row.h.id} className="flex items-center justify-between gap-3 border-t border-[var(--color-border)] py-1.5 first:border-t-0">
+                <span className="shrink-0 text-[var(--color-fg-muted)]">{prettyDate(row.h.testDate)}</span>
+                <span className="flex min-w-0 items-center gap-2">
+                  <BeltBadge rank={row.at} size="sm" />
+                  <span className="shrink-0 text-xs text-[var(--color-fg-muted)]" title={NC_REASON_LABELS[row.h.reason as NcReason]}>
+                    {row.h.reason}
+                  </span>
+                  {row.h.note && <span className="truncate text-xs text-[var(--color-fg-muted)]" title={row.h.note}>{row.h.note}</span>}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {editing && attendance && (
         <div className="mt-3 rounded-md border border-[var(--color-border)] p-3">
           <div className="mb-2 text-sm font-medium">Attendance history</div>
           <div className="mb-3 flex gap-6 text-sm">
-            <div><span className="text-2xl font-semibold">{attendance.total}</span> <span className="text-[var(--color-fg-muted)]">classes total</span></div>
+            <div><span className="text-2xl font-semibold">{attendance.thisCycle}</span> <span className="text-[var(--color-fg-muted)]">current cycle</span></div>
             <div><span className="text-2xl font-semibold">{attendance.sinceLastPromotion}</span> <span className="text-[var(--color-fg-muted)]">since last promotion</span></div>
+            <div><span className="text-2xl font-semibold">{attendance.total}</span> <span className="text-[var(--color-fg-muted)]">classes total</span></div>
           </div>
           {attendance.recent.length === 0 ? (
             <p className="text-xs text-[var(--color-fg-muted)]">No classes recorded yet.</p>

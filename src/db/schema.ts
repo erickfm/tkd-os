@@ -16,6 +16,7 @@ import {
   CLASS_GROUPS,
   EVENT_TYPES,
   ATTENDANCE_STATUSES,
+  NC_REASONS,
 } from "./enums";
 
 const enumCheck = (col: string, values: readonly string[]) =>
@@ -322,6 +323,9 @@ export const testingRegistration = sqliteTable(
       .notNull()
       .references(() => students.id),
     registeredAt: text("registered_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    // "Rank Skip" override — promote straight to this rank instead of the
+    // automatic next rank. NULL = default (automatic) behavior.
+    targetRankId: integer("target_rank_id").references(() => beltRanks.id),
   },
   (t) => ({
     cycleStudentUnique: uniqueIndex("testing_registration_cycle_student_uniq").on(
@@ -355,6 +359,39 @@ export const specialTesters = sqliteTable(
   (t) => ({
     studentUnique: uniqueIndex("special_testers_student_uniq").on(t.studentId),
     dateIdx: index("special_testers_date_idx").on(t.testDate),
+  }),
+);
+
+/**
+ * A registered student tested but wasn't promoted ("No Change"). Recorded
+ * instead of a rank_history row; doesn't touch student_progress — they're
+ * still on the same belt, so their stripes/PTT carry forward to their next
+ * attempt. rank_id is the belt they were testing AT (for record-keeping),
+ * cycle_id links back to the cycle it happened in (nullable defensively,
+ * though cycles are never deleted).
+ */
+export const noChangeHistory = sqliteTable(
+  "no_change_history",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    studentId: integer("student_id")
+      .notNull()
+      .references(() => students.id),
+    rankId: integer("rank_id")
+      .notNull()
+      .references(() => beltRanks.id),
+    cycleId: integer("cycle_id").references(() => testingCycles.id),
+    testDate: text("test_date").notNull(),
+    reason: text("reason").notNull(),
+    note: text("note", { length: 500 }),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (t) => ({
+    studentDateIdx: index("no_change_history_student_date_idx").on(
+      t.studentId,
+      t.testDate,
+    ),
+    reasonCheck: check("no_change_history_reason_chk", enumCheck("reason", NC_REASONS)),
   }),
 );
 
@@ -397,5 +434,6 @@ export type StarterCourseEnrollment = typeof starterCourseEnrollment.$inferSelec
 export type TestingCycle = typeof testingCycles.$inferSelect;
 export type TestingRegistration = typeof testingRegistration.$inferSelect;
 export type SpecialTester = typeof specialTesters.$inferSelect;
+export type NoChangeEntry = typeof noChangeHistory.$inferSelect;
 export type InventorySection = typeof inventorySections.$inferSelect;
 export type InventoryItem = typeof inventoryItems.$inferSelect;

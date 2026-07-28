@@ -11,13 +11,18 @@ import {
   addToRoster,
   buildBeltLabelsHtml,
   buildCertificateRows,
+  clearSpecialTesters,
   buildEventRosterCsv,
+  buildNonTestersCsv,
   buildTestingCycleCsv,
   createEvent,
   createStudent,
+  getBeltOrderBreakdown,
+  getBeltOrderRoster,
   getCurrentCycle,
   getCycleCandidates,
   getCycleRegistrations,
+  getNonTesters,
   getDashboardAlerts,
   getDashboardStats,
   getUpcomingAgenda,
@@ -29,9 +34,12 @@ import {
   getStudentDeleteImpact,
   listEvents,
   listInventory,
+  listNoChangeHistory,
   listPostedEvents,
+  listRankHistory,
   listSpecialTesters,
   listTrialStudents,
+  markNoChange,
   updateInventoryItem,
   postEvent,
   promoteStudent,
@@ -45,6 +53,8 @@ import {
   minClassesToTest,
   promoteCycle,
   registerToTest,
+  setRegistrationTarget,
+  updateRankHistory,
   setAttendance,
   studentsForClass,
   unpostEvent,
@@ -76,6 +86,9 @@ beforeAll(() => {
   sqlite.exec(readFileSync(join(migrationsDir, "0008_inventory.sql"), "utf8"));
   sqlite.exec(readFileSync(join(migrationsDir, "0009_event_class_credit.sql"), "utf8"));
   sqlite.exec(readFileSync(join(migrationsDir, "0010_special_testers.sql"), "utf8"));
+  sqlite.exec(readFileSync(join(migrationsDir, "0011_black_belt_inventory.sql"), "utf8"));
+  sqlite.exec(readFileSync(join(migrationsDir, "0012_no_change_history.sql"), "utf8"));
+  sqlite.exec(readFileSync(join(migrationsDir, "0013_target_rank.sql"), "utf8"));
 
   const blackId = (sqlite
     .prepare("SELECT id FROM belt_ranks WHERE track='regular' AND degree IS NOT NULL ORDER BY sort_order LIMIT 1")
@@ -282,6 +295,495 @@ describe("testing cycle", () => {
 
     await unregisterFromTest(cycle.id, id);
   });
+
+  it("exports students not registered or on the early/late list, falling back to guardian1 phone", async () => {
+    const rank = await lowestRegularColorRank();
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-01-01", "2025-12-31", null);
+
+    const registered = await createStudent(makeInput({ firstName: "Reg", lastName: "Istered", beltRankId: rank.id }));
+    const early = await createStudent(makeInput({ firstName: "Ear", lastName: "Ly", beltRankId: rank.id }));
+    const skipped = await createStudent(makeInput({
+      firstName: "Skip", lastName: "Ped", beltRankId: rank.id, beltSize: "4",
+      phone: null, guardian1Phone: "555-2222",
+    }));
+    const inSession = await getOrCreateSession("2025-05-05", "adult");
+    await setAttendance(inSession, skipped, "present");
+
+    await registerToTest(cycle.id, registered);
+    await addSpecialTester(early, "2025-06-01");
+
+    const nonTesters = await getNonTesters(cycle.id);
+    expect(nonTesters.some((s) => s.id === registered)).toBe(false);
+    expect(nonTesters.some((s) => s.id === early)).toBe(false);
+    const row = nonTesters.find((s) => s.id === skipped)!;
+    expect(row).toBeDefined();
+    expect(row.attendanceThisCycle).toBe(1);
+    expect(row.testingFor).not.toBeNull(); // lowestRegularColorRank() always has a nextRankId
+
+    const csv = await buildNonTestersCsv(cycle.id);
+    const [header, ...rows] = csv.split("\r\n");
+    expect(header).toBe(["Name", "Age", "Belt", "Prospective Rank", "Belt Size", "Attendance", "Phone"].join(","));
+    const line = rows.find((l) => l.startsWith("Skip Ped,"))!;
+    expect(line).toBeDefined();
+    expect(line).toContain(row.testingFor!); // prospective rank
+    expect(line).toContain(",4,"); // belt size
+    expect(line).toContain("555-2222"); // falls back to guardian1Phone since phone is null
+    expect(rows.some((l) => l.startsWith("Reg Istered,"))).toBe(false);
+    expect(rows.some((l) => l.startsWith("Ear Ly,"))).toBe(false);
+
+    await unregisterFromTest(cycle.id, registered);
+    await removeSpecialTester((await listSpecialTesters()).find((r) => r.id === early)!.specialTesterId);
+  });
+});
+
+describe("belt order", () => {
+  it("builds the roster in rank order and the purchase breakdown against inventory stock", async () => {
+    const ranks = await listBeltRanks();
+    const redL3 = ranks.find((r) => r.track === "regular" && r.name === "Red Belt L3")!;
+    const blackL1 = ranks.find((r) => r.track === "regular" && r.name === "1st Degree Black L1")!;
+    const yellow = ranks.find((r) => r.track === "regular" && r.name === "Yellow Belt")!;
+    const cycle = await getCurrentCycle();
+
+    // Red Belt L3 testing into 1st Degree Black L1 — a newly-awarded black
+    // belt IS stocked (as plain "Black"), shown on the breakdown as "Black Belt".
+    const blackId = await createStudent(makeInput({ firstName: "Bla", lastName: "Ck", beltRankId: redL3.id, beltSize: "2" }));
+    // 1st Degree Black L1 testing into 1st Degree Black L2 — that's custom-
+    // monogrammed, not stocked, so on the roster but not the breakdown.
+    const degreeId = await createStudent(makeInput({ firstName: "Deg", lastName: "Ree", beltRankId: blackL1.id, beltSize: "3" }));
+    // Two Yellow Belts testing into Green Belt size 3 — that IS a stocked item.
+    const y1 = await createStudent(makeInput({ firstName: "Yel", lastName: "Low1", beltRankId: yellow.id, beltSize: "3" }));
+    const y2 = await createStudent(makeInput({ firstName: "Yel", lastName: "Low2", beltRankId: yellow.id, beltSize: "3" }));
+    await registerToTest(cycle.id, blackId);
+    await registerToTest(cycle.id, degreeId);
+    await registerToTest(cycle.id, y1);
+    await registerToTest(cycle.id, y2);
+
+    // Need 2 Green/size-3 belts but only 1 on hand.
+    const belts = (await listInventory()).find((s) => s.section.name === "Belts")!;
+    const greenSize3 = belts.items.find((i) => i.name === "Green" && i.size === "3")!;
+    await updateInventoryItem(greenSize3.id, { inStock: 1 });
+
+    const roster = await getBeltOrderRoster(cycle.id);
+    expect(roster.some((r) => r.name === "Bla Ck" && r.testingFor === "1st Degree Black L1")).toBe(true);
+    expect(roster.some((r) => r.name === "Deg Ree" && r.testingFor === "1st Degree Black L2")).toBe(true);
+    expect(roster.filter((r) => r.testingFor === "Green Belt").length).toBe(2);
+    // Rank order: the Yellow Belts (testing for Green, low rank) sort before the Red Belt L3 (testing for Black L1).
+    expect(roster.findIndex((r) => r.testingFor === "Green Belt")).toBeLessThan(roster.findIndex((r) => r.name === "Bla Ck"));
+
+    const breakdown = await getBeltOrderBreakdown(cycle.id);
+    // 1st Degree Black L1 -> shown as "Black Belt", stocked, and included.
+    const blackRow = breakdown.find((b) => b.belt === "Black Belt" && b.size === "2")!;
+    expect(blackRow).toBeDefined();
+    expect(blackRow.needed).toBe(1);
+    expect(blackRow.inStock).toBe(0);
+    expect(blackRow.toPurchase).toBe(1);
+    // 1st Degree Black L2 (and every degree/level past L1) is custom-monogrammed — omitted.
+    expect(breakdown.some((b) => b.belt === "1st Degree Black L2")).toBe(false);
+
+    const greenRow = breakdown.find((b) => b.belt === "Green Belt" && b.size === "3")!;
+    expect(greenRow).toBeDefined();
+    expect(greenRow.needed).toBe(2);
+    expect(greenRow.inStock).toBe(1);
+    expect(greenRow.toPurchase).toBe(1);
+
+    await unregisterFromTest(cycle.id, blackId);
+    await unregisterFromTest(cycle.id, degreeId);
+    await unregisterFromTest(cycle.id, y1);
+    await unregisterFromTest(cycle.id, y2);
+    await updateInventoryItem(greenSize3.id, { inStock: 0 }); // restore for later tests
+  });
+
+  it("groups Tiger Cub belts by stripe color only, ignoring physical belt size", async () => {
+    const ranks = await listBeltRanks();
+    const tigerWhite = ranks.find((r) => r.track === "tiger" && r.sortOrder === 0)!;
+    const cycle = await getCurrentCycle();
+    const id = await createStudent(makeInput({ firstName: "Tig", lastName: "Er", track: "tiger", beltRankId: tigerWhite.id, beltSize: "00" }));
+    await registerToTest(cycle.id, id);
+
+    const breakdown = await getBeltOrderBreakdown(cycle.id);
+    const row = breakdown.find((b) => b.belt === "Tiger Cub Yellow Stripe")!;
+    expect(row).toBeDefined();
+    expect(row.size).toBe("—");
+    expect(row.needed).toBe(1);
+
+    await unregisterFromTest(cycle.id, id);
+  });
+});
+
+describe("promote all — scope of progress reset and cycle date window", () => {
+  it("resets stripes/PTT only for students who tested, leaving untested students' progress untouched", async () => {
+    const rank = await lowestRegularColorRank();
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-01-01", "2025-06-30", "2025-06-15");
+
+    const tested = await createStudent(makeInput({ firstName: "Tes", lastName: "Ted", beltRankId: rank.id }));
+    const untested = await createStudent(makeInput({ firstName: "Unt", lastName: "Ested", beltRankId: rank.id }));
+    await updateProgress(tested, { greenStripe: true, permissionToTest: true });
+    await updateProgress(untested, { greenStripe: true, permissionToTest: true });
+
+    await registerToTest(cycle.id, tested);
+    // `untested` is intentionally left off the roster.
+
+    await promoteCycle(cycle.id);
+
+    const progress = await listStudentsWithProgress();
+    const testedRow = progress.find((s) => s.id === tested)!;
+    const untestedRow = progress.find((s) => s.id === untested)!;
+    expect(testedRow.greenStripe).toBe(false);
+    expect(testedRow.permissionToTest).toBe(false);
+    expect(untestedRow.greenStripe).toBe(true); // not touched — never tested
+    expect(untestedRow.permissionToTest).toBe(true);
+
+    await setStudentActive(tested, false);
+    await setStudentActive(untested, false);
+  });
+
+  it("dates the promotion to the cycle's testing_date, not whatever day Process Testing happens to be clicked", async () => {
+    const rank = await lowestRegularColorRank();
+    const cycle = await getCurrentCycle();
+    // Testing happened on the 18th; staff don't click Process Testing until the 23rd
+    // (waiting on late testers/retests) — the promotion must still be dated the 18th.
+    await updateCycle(cycle.id, "2026-06-01", "2026-08-01", "2026-07-18");
+
+    const id = await createStudent(makeInput({ firstName: "Matt", lastName: "Hew", beltRankId: rank.id }));
+    await registerToTest(cycle.id, id);
+
+    // Classes in the gap between testing day and the (later) Process Testing click.
+    const gap1 = await getOrCreateSession("2026-07-21", "adult");
+    await setAttendance(gap1, id, "present");
+    const gap2 = await getOrCreateSession("2026-07-23", "adult"); // the day the button is actually clicked
+    await setAttendance(gap2, id, "present");
+
+    await promoteCycle(cycle.id); // simulates clicking Process Testing on the 23rd
+
+    const history = await listRankHistory(id);
+    expect(history).toHaveLength(1);
+    expect(history[0].h.promotionDate).toBe("2026-07-18"); // the testing date, not today() / the 23rd
+
+    // Both gap classes now count toward the new cycle, since the cutoff is the 18th.
+    const attendance = await getStudentAttendance(id);
+    expect(attendance.sinceLastPromotion).toBe(2);
+
+    await setStudentActive(id, false);
+  });
+
+  it("rolls the cycle's date window forward after promoting, so class counts reset for everyone", async () => {
+    const rank = await lowestRegularColorRank();
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-01-01", "2025-06-30", "2025-06-15");
+
+    const tested = await createStudent(makeInput({ firstName: "Roll", lastName: "Er", beltRankId: rank.id }));
+    const untested = await createStudent(makeInput({ firstName: "Sti", lastName: "Cked", beltRankId: rank.id }));
+    await registerToTest(cycle.id, tested);
+
+    // Attendance before and after the old testing date, for the untested student.
+    const before = await getOrCreateSession("2025-03-01", "adult");
+    await setAttendance(before, untested, "present");
+    const after = await getOrCreateSession("2025-06-20", "adult"); // after the old testing date
+    await setAttendance(after, untested, "present");
+
+    await promoteCycle(cycle.id); // at least one student registered -> rolls the dates
+
+    const rolled = await getCurrentCycle();
+    expect(rolled.id).toBe(cycle.id); // same single active cycle row, dates rolled in place
+    expect(rolled.startDate).toBe("2025-06-16"); // day after the old testing date
+    expect(rolled.endDate).toBe("2025-09-14"); // 90-day placeholder
+    expect(rolled.testingDate).toBeNull();
+
+    // Class counts reset for EVERYONE, not just the tested student: the
+    // pre-testing-date March class no longer counts, and the June 20 class
+    // (previously excluded as "after the testing date") now does.
+    const candidate = (await getCycleCandidates(cycle.id)).find((c) => c.id === untested)!;
+    expect(candidate.attendanceThisCycle).toBe(1); // only the June 20 session
+
+    await setStudentActive(tested, false);
+    await setStudentActive(untested, false);
+  });
+
+  it("still rolls the cycle's dates when nothing is left registered, as long as a testing date was set (e.g. everyone was marked No Change)", async () => {
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-01-01", "2025-06-30", "2025-06-15");
+
+    await promoteCycle(cycle.id); // nothing registered, but a testing date was scheduled
+
+    const rolled = await getCurrentCycle();
+    expect(rolled.startDate).toBe("2025-06-16");
+    expect(rolled.testingDate).toBeNull();
+  });
+
+  it("leaves the cycle's dates untouched when no testing date was ever set", async () => {
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-01-01", "2025-06-30", null);
+
+    await promoteCycle(cycle.id); // nothing registered, no testing date -> untouched cycle
+
+    const stillCurrent = await getCurrentCycle();
+    expect(stillCurrent.startDate).toBe("2025-01-01");
+    expect(stillCurrent.endDate).toBe("2025-06-30");
+  });
+
+  it("classes attended in the gap between testing day and clicking Promote All count toward the NEXT cycle, not the one that just tested", async () => {
+    const rank = await lowestRegularColorRank();
+    const cycle = await getCurrentCycle();
+    // Mirrors the real workflow: testing on 7/18, but Promote All doesn't
+    // get clicked until several days later (here simulated as 7/24).
+    await updateCycle(cycle.id, "2026-06-01", "2026-08-01", "2026-07-18");
+
+    const tested = await createStudent(makeInput({ firstName: "Test", lastName: "Er", beltRankId: rank.id }));
+    const gapAttender = await createStudent(makeInput({ firstName: "Gap", lastName: "Attender", beltRankId: rank.id }));
+    await registerToTest(cycle.id, tested);
+
+    const testingDay = await getOrCreateSession("2026-07-18", "adult"); // the testing day itself
+    await setAttendance(testingDay, gapAttender, "present");
+    const gapDay1 = await getOrCreateSession("2026-07-19", "adult"); // day right after testing
+    await setAttendance(gapDay1, gapAttender, "present");
+    const gapDay2 = await getOrCreateSession("2026-07-20", "adult"); // "today" in the scenario — still not promoted
+    await setAttendance(gapDay2, gapAttender, "present");
+
+    // Before Promote All is clicked (still 7/20, nothing promoted yet): only
+    // the 7/18 testing-day class counts toward the cycle that's testing —
+    // the 7/19 and 7/20 gap classes are already excluded.
+    let candidate = (await getCycleCandidates(cycle.id)).find((c) => c.id === gapAttender)!;
+    expect(candidate.attendanceThisCycle).toBe(1); // just 7/18
+
+    // Promote All finally gets clicked the following Friday (7/24) — the
+    // wall-clock date it's clicked on doesn't matter; the roll is anchored
+    // to the old testing_date, not to "today".
+    await promoteCycle(cycle.id);
+
+    const rolled = await getCurrentCycle();
+    expect(rolled.startDate).toBe("2026-07-19"); // day after the old testing date
+
+    // Now the 7/19 and 7/20 gap classes count toward the NEW cycle, and the
+    // 7/18 testing-day class does not leak forward into it.
+    candidate = (await getCycleCandidates(cycle.id)).find((c) => c.id === gapAttender)!;
+    expect(candidate.attendanceThisCycle).toBe(2); // 7/19 + 7/20, not 7/18
+
+    await setStudentActive(tested, false);
+    await setStudentActive(gapAttender, false);
+  });
+});
+
+describe("no change (tested but not promoted)", () => {
+  it("records the reason/note against the student's current rank, removes them from the roster, and leaves progress untouched", async () => {
+    const rank = await lowestRegularColorRank();
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-01-01", "2025-06-30", "2025-06-15");
+
+    const id = await createStudent(makeInput({ firstName: "Did", lastName: "Notpass", beltRankId: rank.id }));
+    await updateProgress(id, { greenStripe: true, permissionToTest: true });
+    await registerToTest(cycle.id, id);
+
+    await markNoChange(cycle.id, id, "BB", "Broke form on the third board.");
+
+    // Removed from the roster — same as a promotion, they've been processed.
+    expect((await getCycleRegistrations(cycle.id)).some((r) => r.id === id)).toBe(false);
+
+    // Belt and progress are untouched — no rank_history row, same rank, stripes intact.
+    expect(await listRankHistory(id)).toHaveLength(0);
+    const student = (await listStudents()).find((s) => s.id === id)!;
+    expect(student.beltRankId).toBe(rank.id);
+    const progress = (await listStudentsWithProgress()).find((s) => s.id === id)!;
+    expect(progress.greenStripe).toBe(true);
+    expect(progress.permissionToTest).toBe(true);
+
+    const history = await listNoChangeHistory(id);
+    expect(history).toHaveLength(1);
+    expect(history[0].h.reason).toBe("BB");
+    expect(history[0].h.note).toBe("Broke form on the third board.");
+    expect(history[0].h.testDate).toBe("2025-06-15"); // the cycle's testing date
+    expect(history[0].at.id).toBe(rank.id); // recorded against the belt they were testing at
+
+    await setStudentActive(id, false);
+  });
+
+  it("still rolls the cycle's dates via Process Testing when every registered student was marked No Change", async () => {
+    const rank = await lowestRegularColorRank();
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-02-01", "2025-07-01", "2025-06-20");
+
+    const id = await createStudent(makeInput({ firstName: "All", lastName: "Nc", beltRankId: rank.id }));
+    await registerToTest(cycle.id, id);
+    await markNoChange(cycle.id, id, "Other", null);
+
+    expect(await getCycleRegistrations(cycle.id)).toHaveLength(0); // nobody left to promote
+
+    const results = await promoteCycle(cycle.id); // "Process Testing" with an empty roster
+    expect(results).toHaveLength(0);
+
+    const rolled = await getCurrentCycle();
+    expect(rolled.startDate).toBe("2025-06-21"); // still rolled forward
+
+    await setStudentActive(id, false);
+  });
+});
+
+describe("rank skip (target_rank_id override)", () => {
+  it("lets a Tiger Cub register to test directly for Black Stripe, skipping intermediate stripes, and graduates them", async () => {
+    const ranks = await listBeltRanks();
+    const purpleStripe = ranks.find((r) => r.name === "Tiger Cub Purple Stripe")!;
+    const blackStripe = ranks.find((r) => r.name === "Tiger Cub Black Stripe")!;
+    const whiteBeltRegular = ranks.find((r) => r.track === "regular" && r.sortOrder === 0)!;
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-01-01", "2025-12-31", "2025-06-01");
+
+    const id = await createStudent(makeInput({ firstName: "Early", lastName: "Grad", track: "tiger", beltRankId: purpleStripe.id }));
+    await registerToTest(cycle.id, id);
+    await setRegistrationTarget(cycle.id, id, blackStripe.id);
+
+    const reg = (await getCycleRegistrations(cycle.id)).find((r) => r.id === id)!;
+    expect(reg.targetRankId).toBe(blackStripe.id);
+    expect(reg.testingFor).toBe("Tiger Cub Black Stripe");
+
+    // Consumers that independently look up "next rank" must also honor the override.
+    const certRows = await buildCertificateRows(cycle.id);
+    expect(certRows.some((r) => r.name === "Early Grad")).toBe(true);
+
+    await promoteCycle(cycle.id);
+
+    const history = await listRankHistory(id);
+    expect(history).toHaveLength(2);
+    const graduationRow = history.find((h) => h.h.note === "Graduated from Tiger Cubs")!;
+    expect(graduationRow).toBeDefined();
+    expect(graduationRow.to.id).toBe(whiteBeltRegular.id);
+    const stripeHopRow = history.find((h) => h.h.fromRankId === purpleStripe.id)!;
+    expect(stripeHopRow).toBeDefined();
+    expect(stripeHopRow.to.id).toBe(blackStripe.id); // straight to Black Stripe, no intermediate stripes logged
+
+    const student = (await listStudents()).find((s) => s.id === id)!;
+    expect(student.track).toBe("regular");
+    expect(student.beltRankId).toBe(whiteBeltRegular.id);
+
+    await setStudentActive(id, false);
+  });
+
+  it("lets a Jr./Adult student skip ahead multiple belts in one promotion, and the belt-order breakdown reflects the skip target", async () => {
+    const ranks = await listBeltRanks();
+    const green = ranks.find((r) => r.name === "Green Belt")!;
+    const purple = ranks.find((r) => r.name === "Purple Belt")!;
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-01-01", "2025-12-31", "2025-06-01");
+
+    const id = await createStudent(makeInput({ firstName: "Skip", lastName: "Ahead", beltRankId: green.id, beltSize: "4" }));
+    await registerToTest(cycle.id, id);
+    await setRegistrationTarget(cycle.id, id, purple.id); // skips Sr. Green, Blue, Sr. Blue
+
+    const breakdown = await getBeltOrderBreakdown(cycle.id);
+    expect(breakdown.some((b) => b.belt === "Purple Belt" && b.size === "4")).toBe(true);
+
+    await promoteCycle(cycle.id);
+
+    const history = await listRankHistory(id);
+    expect(history).toHaveLength(1); // one row, not a chain through the skipped belts
+    expect(history[0].h.fromRankId).toBe(green.id);
+    expect(history[0].to.id).toBe(purple.id);
+
+    const student = (await listStudents()).find((s) => s.id === id)!;
+    expect(student.beltRankId).toBe(purple.id);
+
+    await setStudentActive(id, false);
+  });
+
+  it("refuses to promote across tracks — an invalid cross-track target is skipped, not silently applied", async () => {
+    const ranks = await listBeltRanks();
+    const green = ranks.find((r) => r.name === "Green Belt")!;
+    const tigerRedStripe = ranks.find((r) => r.name === "Tiger Cub Red Stripe")!;
+    const cycle = await getCurrentCycle();
+
+    const id = await createStudent(makeInput({ firstName: "Bad", lastName: "Target", beltRankId: green.id }));
+    await registerToTest(cycle.id, id);
+    await setRegistrationTarget(cycle.id, id, tigerRedStripe.id); // invalid: different track
+
+    const results = await promoteCycle(cycle.id);
+    const result = results.find((r) => r.studentId === id)!;
+    expect(result.skipped).toBe("target rank is a different track");
+
+    const student = (await listStudents()).find((s) => s.id === id)!;
+    expect(student.beltRankId).toBe(green.id); // untouched
+    expect(await listRankHistory(id)).toHaveLength(0);
+
+    await setStudentActive(id, false);
+  });
+
+  it("clearing the override (null) reverts to the automatic next rank", async () => {
+    const ranks = await listBeltRanks();
+    const yellow = ranks.find((r) => r.name === "Yellow Belt")!;
+    const purple = ranks.find((r) => r.name === "Purple Belt")!;
+    const cycle = await getCurrentCycle();
+
+    const id = await createStudent(makeInput({ firstName: "Cleared", lastName: "Override", beltRankId: yellow.id }));
+    await registerToTest(cycle.id, id);
+    await setRegistrationTarget(cycle.id, id, purple.id);
+    expect((await getCycleRegistrations(cycle.id)).find((r) => r.id === id)!.testingFor).toBe("Purple Belt");
+
+    await setRegistrationTarget(cycle.id, id, null);
+    expect((await getCycleRegistrations(cycle.id)).find((r) => r.id === id)!.testingFor).toBe("Green Belt");
+
+    await unregisterFromTest(cycle.id, id);
+    await setStudentActive(id, false);
+  });
+});
+
+describe("editing rank history", () => {
+  it("corrects date/rank/note on the most recent promotion and syncs the student's current belt", async () => {
+    const ranks = await listBeltRanks();
+    const green = ranks.find((r) => r.name === "Green Belt")!;
+    const blue = ranks.find((r) => r.name === "Blue Belt")!;
+
+    const id = await createStudent(makeInput({ firstName: "Fix", lastName: "Meup", beltRankId: green.id }));
+    const result = await promoteStudent(id, { date: "2026-07-23" }); // wrong date, promotes to next (Sr. Green)
+    const [row] = await listRankHistory(id);
+
+    await updateRankHistory(row.h.id, { promotionDate: "2026-07-18", toRankId: blue.id, note: "Corrected after the fact" });
+
+    const after = await listRankHistory(id);
+    expect(after).toHaveLength(1);
+    expect(after[0].h.promotionDate).toBe("2026-07-18");
+    expect(after[0].to.id).toBe(blue.id);
+    expect(after[0].h.note).toBe("Corrected after the fact");
+
+    // It was their only (= most recent) promotion, so current belt follows the edit.
+    const student = (await listStudents()).find((s) => s.id === id)!;
+    expect(student.beltRankId).toBe(blue.id);
+    expect(result.skipped).toBeUndefined();
+
+    await setStudentActive(id, false);
+  });
+
+  it("does not touch the student's current belt when editing an older (non-latest) promotion", async () => {
+    const ranks = await listBeltRanks();
+    const green = ranks.find((r) => r.name === "Green Belt")!;
+
+    const id = await createStudent(makeInput({ firstName: "Old", lastName: "Entry", beltRankId: green.id }));
+    await promoteStudent(id, { date: "2026-01-01" }); // -> Sr. Green
+    await promoteStudent(id, { date: "2026-02-01" }); // -> Blue (the latest)
+    const history = await listRankHistory(id);
+    const olderRow = history.find((h) => h.h.promotionDate === "2026-01-01")!;
+
+    await updateRankHistory(olderRow.h.id, { promotionDate: "2025-12-15", toRankId: olderRow.h.toRankId, note: "just a date fix" });
+
+    const student = (await listStudents()).find((s) => s.id === id)!;
+    const latestRow = (await listRankHistory(id)).find((h) => h.h.promotionDate === "2026-02-01")!;
+    expect(student.beltRankId).toBe(latestRow.h.toRankId); // unaffected — the edited row wasn't the latest
+
+    await setStudentActive(id, false);
+  });
+
+  it("refuses to edit a rank into a different track", async () => {
+    const ranks = await listBeltRanks();
+    const green = ranks.find((r) => r.name === "Green Belt")!;
+    const tigerRedStripe = ranks.find((r) => r.name === "Tiger Cub Red Stripe")!;
+
+    const id = await createStudent(makeInput({ firstName: "Track", lastName: "Guard", beltRankId: green.id }));
+    await promoteStudent(id);
+    const [row] = await listRankHistory(id);
+
+    await expect(updateRankHistory(row.h.id, { promotionDate: row.h.promotionDate, toRankId: tigerRedStripe.id, note: null }))
+      .rejects.toThrow();
+
+    await setStudentActive(id, false);
+  });
 });
 
 describe("student attendance history", () => {
@@ -298,6 +800,24 @@ describe("student attendance history", () => {
     const a = await getStudentAttendance(id);
     expect(a.total).toBe(2);
     expect(a.recent.map((r) => r.date)).toEqual(["2025-02-08", "2025-02-01"]);
+  });
+
+  it("counts current-cycle classes separately from since-last-promotion and lifetime total", async () => {
+    const rank = await lowestRegularColorRank();
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-06-01", "2025-08-01", "2025-07-15");
+
+    const id = await createStudent(makeInput({ firstName: "Cyc", lastName: "LeCount", beltRankId: rank.id }));
+    const before = await getOrCreateSession("2025-01-01", "adult"); // before the cycle window
+    await setAttendance(before, id, "present");
+    const inCycle = await getOrCreateSession("2025-06-15", "adult"); // inside start..testingDate
+    await setAttendance(inCycle, id, "present");
+    const afterTesting = await getOrCreateSession("2025-07-20", "adult"); // after testingDate -> not this cycle
+    await setAttendance(afterTesting, id, "present");
+
+    const a = await getStudentAttendance(id);
+    expect(a.thisCycle).toBe(1); // only the 6/15 class
+    expect(a.total).toBe(3); // all three, regardless of cycle window
   });
 });
 
@@ -351,7 +871,7 @@ describe("inventory", () => {
       "Sparring Gear", "Uniforms", "Shirts", "Boards", "Cub Belts", "Belts",
     ]);
     const belts = inv.find((s) => s.section.name === "Belts")!;
-    expect(belts.items.length).toBe(91); // 13 colors x sizes 1-7
+    expect(belts.items.length).toBe(98); // 13 colors x sizes 1-7, plus plain Black x sizes 1-7
     const sparring = inv.find((s) => s.section.name === "Sparring Gear")!;
     expect(sparring.items.some((i) => i.name === "Helmet" && i.size === "S")).toBe(true);
     expect(sparring.items.some((i) => i.name === "Cases" && i.size === null)).toBe(true);
@@ -380,11 +900,11 @@ describe("inventory", () => {
 
   it("adds a multi-size item as one row per size", async () => {
     const belts = (await listInventory()).find((s) => s.section.name === "Belts")!;
-    const ids = await addInventoryItems(belts.section.id, "Black", ["1", "2", "3", "4", "5", "6", "7"]);
+    const ids = await addInventoryItems(belts.section.id, "Camo", ["1", "2", "3", "4", "5", "6", "7"]);
     expect(ids.length).toBe(7);
     const after = (await listInventory()).find((s) => s.section.name === "Belts")!;
-    const black = after.items.filter((i) => i.name === "Black");
-    expect(black.map((i) => i.size)).toEqual(["1", "2", "3", "4", "5", "6", "7"]);
+    const camo = after.items.filter((i) => i.name === "Camo");
+    expect(camo.map((i) => i.size)).toEqual(["1", "2", "3", "4", "5", "6", "7"]);
   });
 
   it("adds a single null-size row when no sizes are given", async () => {
@@ -608,6 +1128,48 @@ describe("early/late testers", () => {
 
     await removeSpecialTester(row.specialTesterId);
     expect((await listSpecialTesters()).some((r) => r.id === id)).toBe(false);
+  });
+
+  it("orders by test date first, then rank, then age (youngest to oldest)", async () => {
+    const ranks = await listBeltRanks();
+    const white = ranks.find((r) => r.track === "regular" && r.name === "White Belt")!;
+    const yellow = ranks.find((r) => r.track === "regular" && r.name === "Yellow Belt")!;
+
+    // Earliest date but a higher rank — date wins, so this sorts first overall.
+    const earliest = await createStudent(makeInput({ firstName: "Ear", lastName: "Liest", beltRankId: yellow.id, dateOfBirth: "2010-01-01" }));
+    // Same later date as the next two, but lower rank -> sorts before them.
+    const lowerRank = await createStudent(makeInput({ firstName: "Low", lastName: "Rank", beltRankId: white.id, dateOfBirth: "2010-01-01" }));
+    // Same later date, same (higher) rank as `older`, but younger -> sorts before `older`.
+    const younger = await createStudent(makeInput({ firstName: "You", lastName: "Nger", beltRankId: yellow.id, dateOfBirth: "2018-01-01" }));
+    const older = await createStudent(makeInput({ firstName: "Old", lastName: "Er", beltRankId: yellow.id, dateOfBirth: "2005-01-01" }));
+
+    await addSpecialTester(earliest, "2025-01-01");
+    await addSpecialTester(lowerRank, "2025-06-01");
+    await addSpecialTester(younger, "2025-06-01");
+    await addSpecialTester(older, "2025-06-01");
+
+    const rows = await listSpecialTesters();
+    const indexOf = (id: number) => rows.findIndex((r) => r.id === id);
+    expect(indexOf(earliest)).toBeLessThan(indexOf(lowerRank)); // earliest date first
+    expect(indexOf(lowerRank)).toBeLessThan(indexOf(younger)); // same date -> lower rank first
+    expect(indexOf(younger)).toBeLessThan(indexOf(older)); // same date+rank -> younger first
+
+    for (const id of [earliest, lowerRank, younger, older]) {
+      const specialId = (await listSpecialTesters()).find((r) => r.id === id)!.specialTesterId;
+      await removeSpecialTester(specialId);
+    }
+  });
+
+  it("clears the whole early/late testers list at once", async () => {
+    const rank = await lowestRegularColorRank();
+    const a = await createStudent(makeInput({ firstName: "Cle", lastName: "Ara", beltRankId: rank.id }));
+    const b = await createStudent(makeInput({ firstName: "Cle", lastName: "Bea", beltRankId: rank.id }));
+    await addSpecialTester(a, "2025-05-01");
+    await addSpecialTester(b, "2025-05-02");
+    expect(await listSpecialTesters()).toHaveLength(2);
+
+    await clearSpecialTesters();
+    expect(await listSpecialTesters()).toHaveLength(0);
   });
 });
 

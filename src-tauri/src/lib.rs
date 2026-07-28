@@ -84,6 +84,24 @@ pub fn run() {
             sql: include_str!("../migrations/0010_special_testers.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 11,
+            description: "black_belt_inventory",
+            sql: include_str!("../migrations/0011_black_belt_inventory.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 12,
+            description: "no_change_history",
+            sql: include_str!("../migrations/0012_no_change_history.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 13,
+            description: "target_rank",
+            sql: include_str!("../migrations/0013_target_rank.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()

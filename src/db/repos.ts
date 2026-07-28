@@ -9,6 +9,7 @@ import {
   events,
   inventoryItems,
   inventorySections,
+  noChangeHistory,
   rankHistory,
   specialTesters,
   starterCourseEnrollment,
@@ -19,8 +20,8 @@ import {
   testingRegistration,
 } from "./schema";
 import type { BeltRank, InventoryItem, InventorySection, Student, TestingCycle } from "./schema";
-import { ageFromDob, beltRankOrder, prettyDate, today } from "@/lib/format";
-import { CLASS_TYPE_LABELS } from "./enums";
+import { ageFromDob, beltRankOrder, today } from "@/lib/format";
+import { CLASS_TYPE_LABELS, type NcReason } from "./enums";
 
 // ----------------------------------------------------------------------------
 // Belt ranks
@@ -331,13 +332,70 @@ export async function listRankHistory(studentId: number) {
   return rows.map((x) => ({ h: x.h, to: toRank(x) }));
 }
 
+export interface RankHistoryEdit {
+  promotionDate: string;
+  toRankId: number;
+  note: string | null;
+}
+
 /**
- * Promote a single student one step, handling the Tiger Cub graduation flow.
- * Returns a result describing what happened (or why it was skipped).
+ * Correct a rank_history row after the fact (date, rank earned, note) — for
+ * fixing mistakes rather than doing another promotion. The new rank must
+ * stay in the same track as the row's current one; track changes only ever
+ * happen through the graduation flow. If this is the student's most recent
+ * promotion (by date), also syncs students.belt_rank_id so their current
+ * belt matches the correction.
+ */
+export async function updateRankHistory(id: number, edit: RankHistoryEdit): Promise<void> {
+  const db = await getDb();
+  const [row] = await db.select().from(rankHistory).where(eq(rankHistory.id, id));
+  if (!row) return;
+  const oldRank = await rankById(row.toRankId);
+  const newRank = await rankById(edit.toRankId);
+  if (!oldRank || !newRank || newRank.track !== oldRank.track) {
+    throw new Error("The new rank must be in the same track as the original.");
+  }
+
+  await db
+    .update(rankHistory)
+    .set({ promotionDate: edit.promotionDate, toRankId: edit.toRankId, note: edit.note, updatedAt: sql`CURRENT_TIMESTAMP` })
+    .where(eq(rankHistory.id, id));
+
+  const [latest] = await db
+    .select({ id: rankHistory.id })
+    .from(rankHistory)
+    .where(eq(rankHistory.studentId, row.studentId))
+    .orderBy(desc(rankHistory.promotionDate), desc(rankHistory.id))
+    .limit(1);
+  if (latest?.id === id) {
+    await db
+      .update(students)
+      .set({ beltRankId: edit.toRankId, updatedAt: sql`CURRENT_TIMESTAMP` })
+      .where(eq(students.id, row.studentId));
+  }
+}
+
+/** A student's "No Change" (tested, not promoted) history, most recent first. */
+export async function listNoChangeHistory(studentId: number) {
+  const db = await getDb();
+  const rows = await db
+    .select({ h: noChangeHistory, ...rankCols })
+    .from(noChangeHistory)
+    .innerJoin(beltRanks, eq(noChangeHistory.rankId, beltRanks.id))
+    .where(eq(noChangeHistory.studentId, studentId))
+    .orderBy(desc(noChangeHistory.testDate));
+  return rows.map((x) => ({ h: x.h, at: toRank(x) }));
+}
+
+/**
+ * Promote a single student one step (or, with targetRankId, straight to a
+ * chosen rank — "Rank Skip" / a Tiger Cub testing directly for Black Stripe),
+ * handling the Tiger Cub graduation flow. Returns a result describing what
+ * happened (or why it was skipped).
  */
 export async function promoteStudent(
   studentId: number,
-  opts: { date?: string; note?: string | null; eventId?: number | null } = {},
+  opts: { date?: string; note?: string | null; eventId?: number | null; targetRankId?: number | null } = {},
 ): Promise<PromotionResult> {
   const db = await getDb();
   const [s] = await db.select().from(students).where(eq(students.id, studentId));
@@ -356,13 +414,17 @@ export async function promoteStudent(
     return graduate(s, current, date, eventId, name);
   }
 
-  if (current.nextRankId == null) {
+  const targetId = opts.targetRankId ?? current.nextRankId;
+  if (targetId == null) {
     return { studentId, name, previousBelt: current.name, newBelt: current.name, beltSize: s.beltSize, graduated: false, skipped: "already at top rank" };
   }
 
-  const next = await rankById(current.nextRankId);
+  const next = await rankById(targetId);
   if (!next) {
     return { studentId, name, previousBelt: current.name, newBelt: current.name, beltSize: s.beltSize, graduated: false, skipped: "next rank missing" };
+  }
+  if (next.track !== current.track) {
+    return { studentId, name, previousBelt: current.name, newBelt: current.name, beltSize: s.beltSize, graduated: false, skipped: "target rank is a different track" };
   }
 
   // Promoting INTO the graduation rank: record the black-stripe hop, then graduate.
@@ -614,6 +676,7 @@ export interface TestingRow extends StudentRow {
   minClasses: number;
   meetsMinimum: boolean;
   testingFor: string | null;
+  targetRankId: number | null;
 }
 
 /** Registered students for a cycle, with their stripes + cycle attendance count. */
@@ -624,6 +687,7 @@ export async function getCycleRegistrations(cycleId: number): Promise<TestingRow
     .select({
       s: students,
       ...rankCols,
+      targetRankId: testingRegistration.targetRankId,
       green: studentProgress.greenStripe,
       blue: studentProgress.blueStripe,
       orange: studentProgress.orangeStripe,
@@ -644,7 +708,8 @@ export async function getCycleRegistrations(cycleId: number): Promise<TestingRow
 
   return rows.map((x) => {
     const rank = toRank(x);
-    const next = rank.nextRankId ? rankById.get(rank.nextRankId) : null;
+    const targetId = x.targetRankId ?? rank.nextRankId;
+    const next = targetId ? rankById.get(targetId) : null;
     const attended = attendance.get(x.s.id) ?? 0;
     const minClasses = minClassesToTest(rank);
     return {
@@ -659,8 +724,27 @@ export async function getCycleRegistrations(cycleId: number): Promise<TestingRow
       minClasses,
       meetsMinimum: attended >= minClasses,
       testingFor: next ? next.name : null,
+      targetRankId: x.targetRankId,
     };
   });
+}
+
+/**
+ * Override a registered student's testing target ("Rank Skip") to a specific
+ * rank rather than the automatic next rank — how a Tiger Cub registers to
+ * test directly for Black Stripe, or a Jr./Adult student skips ahead. Pass
+ * null to clear the override and go back to the automatic next rank.
+ */
+export async function setRegistrationTarget(
+  cycleId: number,
+  studentId: number,
+  targetRankId: number | null,
+): Promise<void> {
+  const db = await getDb();
+  await db
+    .update(testingRegistration)
+    .set({ targetRankId })
+    .where(and(eq(testingRegistration.cycleId, cycleId), eq(testingRegistration.studentId, studentId)));
 }
 
 async function getCycleById(id: number): Promise<TestingCycle> {
@@ -724,6 +808,7 @@ export interface CandidateRow extends StudentRow {
   minClasses: number;
   meetsMinimum: boolean;
   registered: boolean;
+  testingFor: string | null;
 }
 
 /** All active students with their attendance in this cycle + whether registered. */
@@ -740,6 +825,8 @@ export async function getCycleCandidates(cycleId: number): Promise<CandidateRow[
 
   const ids = rows.map((x) => x.s.id);
   const attendance = await presentCountsInRange(ids, cycle.startDate, cycle.testingDate ?? cycle.endDate);
+  const ranks = await listBeltRanks();
+  const rankById = new Map(ranks.map((r) => [r.id, r]));
 
   const reg = await db
     .select({ studentId: testingRegistration.studentId })
@@ -749,6 +836,7 @@ export async function getCycleCandidates(cycleId: number): Promise<CandidateRow[
 
   return rows.map((x) => {
     const rank = toRank(x);
+    const next = rank.nextRankId ? rankById.get(rank.nextRankId) : null;
     const attended = attendance.get(x.s.id) ?? 0;
     const minClasses = minClassesToTest(rank);
     return {
@@ -759,6 +847,7 @@ export async function getCycleCandidates(cycleId: number): Promise<CandidateRow[
       minClasses,
       meetsMinimum: attended >= minClasses,
       registered: registered.has(x.s.id),
+      testingFor: next ? next.name : null,
     };
   });
 }
@@ -767,18 +856,69 @@ export async function getCycleCandidates(cycleId: number): Promise<CandidateRow[
  * Promote every registered student one rank (lowest rank first), then clear the
  * registration list so the cycle is ready for the next round and no one is
  * promoted twice. Reuses promoteStudent (logs rank_history, handles graduation).
+ * Students already pulled off the roster via markNoChange are simply not here.
+ *
+ * Promotions are dated to the cycle's testing_date (the day the student
+ * actually tested), NOT the day this is clicked — staff routinely wait days
+ * (handling late testers/retests) before clicking Process Testing, and the
+ * promotion should be recorded as earned on testing day itself.
+ *
+ * Also rolls the cycle's date window forward so class counts reset for
+ * everyone (not just the students who tested): the new start date is the day
+ * after this cycle's testing date, with a 90-day placeholder end date and no
+ * testing date, until staff sets the real dates for the next cycle via the
+ * Cycle start/end/testing fields. Rolls whenever a testing date was set —
+ * even if the roster is now empty (e.g. everyone left was marked No Change) —
+ * but not for an untouched cycle that never had a testing date scheduled.
  */
 export async function promoteCycle(cycleId: number): Promise<PromotionResult[]> {
+  const cycle = await getCycleById(cycleId);
+  const testDate = cycle.testingDate ?? today();
   const roster = await getCycleRegistrations(cycleId); // sorted by sort_order asc
   const results: PromotionResult[] = [];
   for (const s of roster) {
-    results.push(await promoteStudent(s.id, { eventId: null }));
+    results.push(await promoteStudent(s.id, { date: testDate, eventId: null, targetRankId: s.targetRankId }));
   }
   const db = await getDb();
   await db
     .delete(testingRegistration)
     .where(eq(testingRegistration.cycleId, cycleId));
+
+  if (cycle.testingDate) {
+    const newStart = addDays(cycle.testingDate, 1);
+    await updateCycle(cycleId, newStart, addDays(newStart, 90), null);
+  }
+
   return results;
+}
+
+/**
+ * Record that a registered student tested but wasn't promoted ("No Change"),
+ * then remove them from the cycle's roster — same as a successful promotion,
+ * they've been processed for this testing. Doesn't touch student_progress:
+ * they're still working toward the same belt, so their stripes/PTT carry
+ * forward to their next attempt.
+ */
+export async function markNoChange(
+  cycleId: number,
+  studentId: number,
+  reason: NcReason,
+  note: string | null,
+): Promise<void> {
+  const db = await getDb();
+  const [s] = await db.select().from(students).where(eq(students.id, studentId));
+  const cycle = await getCycleById(cycleId);
+  await db.insert(noChangeHistory).values({
+    studentId,
+    rankId: s.beltRankId,
+    cycleId,
+    testDate: cycle.testingDate ?? today(),
+    reason,
+    note,
+  });
+  await db
+    .delete(testingRegistration)
+    .where(and(eq(testingRegistration.cycleId, cycleId), eq(testingRegistration.studentId, studentId)));
 }
 
 /**
@@ -848,6 +988,35 @@ export async function buildTestingCycleCsv(cycleId: number): Promise<string> {
   return lines.join("\r\n");
 }
 
+/** Active students neither registered to test nor on the early/late list. */
+export async function getNonTesters(cycleId: number): Promise<CandidateRow[]> {
+  const [candidates, special] = await Promise.all([
+    getCycleCandidates(cycleId),
+    listSpecialTesters(),
+  ]);
+  const specialIds = new Set(special.map((s) => s.id));
+  return candidates.filter((s) => !s.registered && !specialIds.has(s.id));
+}
+
+/** CSV export of students not selected for testing: name, age, belt, prospective rank, belt size, attendance, phone. */
+export async function buildNonTestersCsv(cycleId: number): Promise<string> {
+  const rows = (await getNonTesters(cycleId)).slice().sort(compareForExport);
+  const lines = [csvRow(["Name", "Age", "Belt", "Prospective Rank", "Belt Size", "Attendance", "Phone"])];
+  for (const s of rows) {
+    const age = ageFromDob(s.dateOfBirth);
+    lines.push(csvRow([
+      `${s.firstName} ${s.lastName}`,
+      age,
+      s.rank.name,
+      s.testingFor ?? "(top rank)",
+      s.beltSize ?? "",
+      s.attendanceThisCycle,
+      s.phone || s.guardian1Phone || "",
+    ]));
+  }
+  return lines.join("\r\n");
+}
+
 // Certificate "Color" wording, matching the school's historical mail-merge files
 // (Dropbox "Certificate Data"). Keyed by the app belt name → the exact text that
 // prints on the certificate: Tiger Cubs as "Cub/<color>", seniors spelled out as
@@ -911,13 +1080,135 @@ export async function buildCertificateRows(cycleId: number): Promise<Certificate
   const regs = await getCycleRegistrations(cycleId);
   const byId = new Map((await listBeltRanks()).map((r) => [r.id, r]));
   return regs
-    .map((s) => ({ s, next: s.rank.nextRankId ? byId.get(s.rank.nextRankId) ?? null : null }))
+    .map((s) => {
+      const targetId = s.targetRankId ?? s.rank.nextRankId;
+      return { s, next: targetId ? byId.get(targetId) ?? null : null };
+    })
     .filter((x): x is { s: TestingRow; next: BeltRank } => x.next != null)
     .sort((a, b) =>
       beltRankOrder(a.next) - beltRankOrder(b.next) ||
       a.s.lastName.localeCompare(b.s.lastName) ||
       a.s.firstName.localeCompare(b.s.firstName))
     .map((x) => ({ name: `${x.s.firstName} ${x.s.lastName}`, rank: CERT_BELT_NAME[x.next.name] ?? x.next.name }));
+}
+
+// ----------------------------------------------------------------------------
+// Belt order (roster + purchase breakdown, checked against inventory on hand)
+// ----------------------------------------------------------------------------
+
+// Regular-track belts stocked as sized items in the inventory "Belts" section,
+// keyed by belt_ranks.name -> the inventory item's "name" (color/level label).
+// White Belt is intentionally omitted — it ships with the starter uniform, not
+// purchased per size through this section. 1st Degree Black L1 IS included: a
+// Red Belt L3 testing into it gets a new plain "Black" belt, stocked like any
+// other color. Every Black degree/level PAST 1st Degree L1 is omitted — those
+// are custom-monogrammed and ordered separately, not stocked here.
+const BELT_INVENTORY_NAME: Record<string, string> = {
+  "Yellow Belt": "Yellow",
+  "Green Belt": "Green",
+  "Sr. Green Belt": "Sr. Green",
+  "Blue Belt": "Blue",
+  "Sr. Blue Belt": "Sr. Blue",
+  "Purple Belt": "Purple",
+  "Sr. Purple Belt": "Sr. Purple",
+  "Brown Belt L1": "Brown L1",
+  "Brown Belt L2": "Brown L2",
+  "Brown Belt L3": "Brown L3",
+  "Red Belt L1": "Red L1",
+  "Red Belt L2": "Red L2",
+  "Red Belt L3": "Red L3",
+  "1st Degree Black L1": "Black",
+};
+
+// Tiger Cub belts are tracked as one "Cub Belt" item per stripe color in the
+// "Cub Belts" section (no physical-size variants) — keyed by belt_ranks.name
+// -> the inventory item's "size" column, which holds the stripe color there.
+const CUB_BELT_STRIPE: Record<string, string> = {
+  "Tiger Cub Yellow Stripe": "Yellow Stripe",
+  "Tiger Cub Green Stripe": "Green Stripe",
+  "Tiger Cub Blue Stripe": "Blue Stripe",
+  "Tiger Cub Purple Stripe": "Purple Stripe",
+  "Tiger Cub Brown Stripe": "Brown Stripe",
+  "Tiger Cub Red Stripe": "Red Stripe",
+  "Tiger Cub Black Stripe": "Black Stripe",
+};
+
+// Display override for the Order Breakdown sheet's "Belt" column — "1st
+// Degree Black L1" is the internal rank name, but the physical item being
+// ordered is just a plain black belt, so show it as "Black Belt" there.
+const BELT_ORDER_DISPLAY_NAME: Record<string, string> = {
+  "1st Degree Black L1": "Black Belt",
+};
+
+export interface BeltOrderRow {
+  name: string;
+  age: number | null;
+  currentBelt: string;
+  testingFor: string | null;
+  beltSize: string | null;
+}
+
+/** Registered-to-test roster for the belt order sheet, in rank order. */
+export async function getBeltOrderRoster(cycleId: number): Promise<BeltOrderRow[]> {
+  const roster = (await getCycleRegistrations(cycleId)).slice().sort(compareForExport);
+  return roster.map((s) => ({
+    name: `${s.firstName} ${s.lastName}`,
+    age: ageFromDob(s.dateOfBirth),
+    currentBelt: s.rank.name,
+    testingFor: s.testingFor,
+    beltSize: s.beltSize,
+  }));
+}
+
+export interface BeltOrderNeed {
+  belt: string;
+  size: string;
+  needed: number;
+  inStock: number;
+  toPurchase: number;
+}
+
+/**
+ * How many of each testing-for belt/size are needed vs. what's on hand, per
+ * the inventory "Belts" and "Cub Belts" sections. Students testing for a
+ * belt that isn't stocked there (White Belt, Black degrees past 1st Degree
+ * L1) are left off this breakdown — see BELT_INVENTORY_NAME / CUB_BELT_STRIPE
+ * above.
+ */
+export async function getBeltOrderBreakdown(cycleId: number): Promise<BeltOrderNeed[]> {
+  const roster = await getCycleRegistrations(cycleId);
+  const ranks = await listBeltRanks();
+  const rankById = new Map(ranks.map((r) => [r.id, r]));
+  const stockItems = (await listInventory())
+    .filter((s) => s.section.name === "Belts" || s.section.name === "Cub Belts")
+    .flatMap((s) => s.items);
+  const stockFor = (name: string, size: string) =>
+    stockItems.find((i) => i.name === name && i.size === size)?.inStock ?? 0;
+
+  interface Accum { belt: BeltRank; size: string; invName: string; invSize: string; count: number }
+  const needed = new Map<string, Accum>();
+  for (const s of roster) {
+    const targetId = s.targetRankId ?? s.rank.nextRankId;
+    const next = targetId ? rankById.get(targetId) : null;
+    if (!next) continue; // already at top rank — nothing to order
+    const isTiger = next.track === "tiger";
+    const invName = isTiger ? "Cub Belt" : BELT_INVENTORY_NAME[next.name];
+    const invSize = isTiger ? CUB_BELT_STRIPE[next.name] : s.beltSize;
+    if (!invName || !invSize) continue; // not stocked per size — omit from the breakdown
+    const displaySize = isTiger ? "—" : invSize;
+    const key = `${invName}::${invSize}`;
+    const row = needed.get(key) ?? { belt: next, size: displaySize, invName, invSize, count: 0 };
+    row.count += 1;
+    needed.set(key, row);
+  }
+
+  return Array.from(needed.values())
+    .sort((a, b) => beltRankOrder(a.belt) - beltRankOrder(b.belt) || a.size.localeCompare(b.size))
+    .map((r) => {
+      const inStock = stockFor(r.invName, r.invSize);
+      const belt = BELT_ORDER_DISPLAY_NAME[r.belt.name] ?? r.belt.name;
+      return { belt, size: r.size, needed: r.count, inStock, toPurchase: Math.max(r.count - inStock, 0) };
+    });
 }
 
 // ----------------------------------------------------------------------------
@@ -970,6 +1261,12 @@ export async function removeSpecialTester(id: number): Promise<void> {
   await db.delete(specialTesters).where(eq(specialTesters.id, id));
 }
 
+/** Clear the entire early/late testers list (e.g. once a cycle's been fully processed). */
+export async function clearSpecialTesters(): Promise<void> {
+  const db = await getDb();
+  await db.delete(specialTesters);
+}
+
 /** Everyone on the early/late list, with belt/attendance context, soonest date first. */
 export async function listSpecialTesters(): Promise<SpecialTestRow[]> {
   const db = await getDb();
@@ -1018,43 +1315,13 @@ export async function listSpecialTesters(): Promise<SpecialTestRow[]> {
       meetsMinimum: attendance >= minClasses,
     });
   }
+  // Earliest to latest test date, then lowest to highest rank, then youngest to oldest.
+  result.sort((a, b) =>
+    a.testDate.localeCompare(b.testDate) ||
+    beltRankOrder(a.rank) - beltRankOrder(b.rank) ||
+    (ageFromDob(a.dateOfBirth) ?? -1) - (ageFromDob(b.dateOfBirth) ?? -1) ||
+    a.lastName.localeCompare(b.lastName));
   return result;
-}
-
-/** Print-ready HTML sheet: name, age, belt, testing-for, date, timing, and a checkbox to mark tested. */
-export async function buildSpecialTestersSheetHtml(): Promise<string> {
-  const rows = await listSpecialTesters();
-  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const tr = (s: SpecialTestRow) => `
-    <tr>
-      <td>${esc(`${s.firstName} ${s.lastName}`)}</td>
-      <td>${ageFromDob(s.dateOfBirth) ?? "—"}</td>
-      <td>${esc(s.rank.name)}</td>
-      <td>${esc(s.testingFor ?? "(top rank)")}</td>
-      <td>${esc(prettyDate(s.testDate))}</td>
-      <td>${s.timing}</td>
-      <td class="box"></td>
-    </tr>`;
-  return `<!doctype html>
-<html><head><meta charset="utf-8"><title>Early / Late Testers</title>
-<style>
-  @page { size: letter; margin: 0.6in; }
-  body { font-family: Arial, Helvetica, sans-serif; }
-  h1 { font-size: 16pt; margin: 0 0 4px; }
-  p.sub { margin: 0 0 16px; color: #555; font-size: 10pt; }
-  table { width: 100%; border-collapse: collapse; font-size: 10.5pt; }
-  th, td { border: 1px solid #999; padding: 6px 8px; text-align: left; }
-  th { background: #eee; }
-  td.box { width: 0.4in; }
-</style></head>
-<body>
-  <h1>Early / Late Testers</h1>
-  <p class="sub">Generated ${esc(prettyDate(today()))}</p>
-  <table>
-    <thead><tr><th>Name</th><th>Age</th><th>Current Belt</th><th>Testing For</th><th>Date</th><th>Timing</th><th>Tested</th></tr></thead>
-    <tbody>${rows.length ? rows.map(tr).join("") : `<tr><td colspan="7">No early/late testers.</td></tr>`}</tbody>
-  </table>
-</body></html>`;
 }
 
 // ----------------------------------------------------------------------------
@@ -1201,6 +1468,7 @@ export async function setAttendance(
 
 export interface StudentAttendanceSummary {
   total: number;
+  thisCycle: number;
   sinceLastPromotion: number;
   recent: { date: string; label: string }[];
 }
@@ -1235,7 +1503,9 @@ export async function getStudentAttendance(studentId: number): Promise<StudentAt
 
   const total = combined.reduce((sum, r) => sum + r.credit, 0);
   const sinceLastPromotion = await classesSincePromotion(studentId);
-  return { total, sinceLastPromotion, recent: combined.map(({ date, label }) => ({ date, label })) };
+  const cycle = await getCurrentCycle();
+  const thisCycle = (await presentCountsInRange([studentId], cycle.startDate, cycle.testingDate ?? cycle.endDate)).get(studentId) ?? 0;
+  return { total, thisCycle, sinceLastPromotion, recent: combined.map(({ date, label }) => ({ date, label })) };
 }
 
 /** Count of present classes + posted-event credit since the student's last promotion. */

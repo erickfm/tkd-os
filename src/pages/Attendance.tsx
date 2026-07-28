@@ -15,9 +15,13 @@ import {
 } from "@/db/repos";
 import { today } from "@/lib/format";
 
+// Remembered for the current app session only (resets on relaunch) so that
+// navigating away from Attendance and back keeps the last class selected.
+let lastClassType: ClassType = "tiger";
+
 export function AttendancePage() {
   const [date, setDate] = useState(today());
-  const [classType, setClassType] = useState<ClassType>("tiger");
+  const [classType, setClassType] = useState<ClassType>(lastClassType);
   const [sessionId, setSessionId] = useState<number | null>(null);
   const [roster, setRoster] = useState<StudentRow[]>([]);
   const [statuses, setStatuses] = useState<Map<number, string>>(new Map());
@@ -67,7 +71,15 @@ export function AttendancePage() {
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-44" />
-        <Select value={classType} onChange={(e) => setClassType(e.target.value as ClassType)} className="w-64">
+        <Select
+          value={classType}
+          onChange={(e) => {
+            const next = e.target.value as ClassType;
+            lastClassType = next;
+            setClassType(next);
+          }}
+          className="w-64"
+        >
           {CLASS_TYPES.map((ct) => (
             <option key={ct} value={ct}>{CLASS_TYPE_LABELS[ct]}</option>
           ))}

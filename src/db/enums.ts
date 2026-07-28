@@ -55,3 +55,16 @@ export const CLASS_TYPE_LABELS: Record<ClassType, string> = {
   adult: "Adult",
   private: "Private Lessons",
 };
+
+// Reason a registered student tested but didn't earn a promotion ("No Change").
+export const NC_REASONS = ["F", "S", "BB", "CS", "ACT", "Other"] as const;
+export type NcReason = (typeof NC_REASONS)[number];
+
+export const NC_REASON_LABELS: Record<NcReason, string> = {
+  F: "Forms",
+  S: "Sparring",
+  BB: "Board Breaking",
+  CS: "Contact Skill",
+  ACT: "ACT Technique",
+  Other: "Other",
+};
