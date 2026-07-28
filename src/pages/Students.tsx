@@ -1,20 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Plus, UserCog, X } from "lucide-react";
+import { Plus, X } from "lucide-react";
 
 import { PageHeader } from "@/components/PageHeader";
 import { BeltBadge } from "@/components/BeltBadge";
 import { Button, EmptyState } from "@/components/ui";
 import { StudentForm } from "./StudentForm";
 import {
-  autoFlagAdultsByDob,
   listBeltRanks,
   listStudents,
   type StudentRow,
 } from "@/db/repos";
 import type { BeltRank } from "@/db/schema";
 import { BELT_SIZES } from "@/db/enums";
-import { AGE_GROUP_LABEL, prettyDate, TRACK_LABEL } from "@/lib/format";
+import { AGE_GROUP_LABEL, beltRankOrder, prettyDate, TRACK_LABEL } from "@/lib/format";
 
 type TrackFilter = "all" | "regular" | "tiger";
 type Special = "all" | "black" | "ptt";
@@ -31,7 +30,7 @@ const beltSizeSort = (r: StudentRow) => {
 // Ascending comparator per column; direction is applied by the caller.
 const COMPARATORS: Record<SortKey, (a: StudentRow, b: StudentRow) => number> = {
   name: (a, b) => a.lastName.localeCompare(b.lastName) || a.firstName.localeCompare(b.firstName),
-  belt: (a, b) => a.rank.track.localeCompare(b.rank.track) || a.rank.sortOrder - b.rank.sortOrder,
+  belt: (a, b) => beltRankOrder(a.rank) - beltRankOrder(b.rank),
   track: (a, b) => TRACK_LABEL[a.track].localeCompare(TRACK_LABEL[b.track]),
   ageGroup: (a, b) => ageGroupSort(a).localeCompare(ageGroupSort(b)),
   beltSize: (a, b) => beltSizeSort(a) - beltSizeSort(b),
@@ -111,23 +110,12 @@ export function StudentsPage() {
     setParams(params, { replace: true });
   }
 
-  async function flagAdults() {
-    const n = await autoFlagAdultsByDob(18);
-    await load();
-    alert(`Flagged ${n} student${n === 1 ? "" : "s"} as Adult (18+ by birthdate).`);
-  }
-
   return (
     <>
       <PageHeader
         title="Students"
         subtitle={rows ? `${filtered.length} shown of ${rows.length} total` : "Loading…"}
-        actions={
-          <>
-            <Button variant="secondary" onClick={flagAdults}><UserCog size={16} />Flag adults</Button>
-            <Button variant="primary" onClick={openNew}><Plus size={16} />Add student</Button>
-          </>
-        }
+        actions={<Button variant="primary" onClick={openNew}><Plus size={16} />Add student</Button>}
       />
 
       {error && (

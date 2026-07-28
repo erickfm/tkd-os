@@ -1,0 +1,5 @@
+# Freeze migration SQL bytes: git's autocrlf line-ending conversion changes
+# these files after they're applied, which makes sqlx's stored checksums drift
+# and silently blocks every new migration. Treat them as binary so git never
+# rewrites them. (See docs/HANDOFF.md / the migration-checksum notes.)
+src-tauri/migrations/*.sql -text

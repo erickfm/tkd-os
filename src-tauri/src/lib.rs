@@ -1,9 +1,24 @@
+use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_sql::{Migration, MigrationKind};
 
 /// Write text to a path the user explicitly chose via the OS Save dialog.
 #[tauri::command]
 fn write_text_file(path: String, contents: String) -> Result<(), String> {
     std::fs::write(&path, contents).map_err(|e| e.to_string())
+}
+
+/// Write raw bytes (e.g. a generated .xlsx) to a user-chosen path.
+#[tauri::command]
+fn write_bytes_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())
+}
+
+/// Open a saved file with the OS default application (so exports open on save).
+#[tauri::command]
+fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -39,6 +54,54 @@ pub fn run() {
             sql: include_str!("../migrations/0005_legacy_id.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 6,
+            description: "testing_date",
+            sql: include_str!("../migrations/0006_testing_date.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 7,
+            description: "trial_start",
+            sql: include_str!("../migrations/0007_trial_start.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 8,
+            description: "inventory",
+            sql: include_str!("../migrations/0008_inventory.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 9,
+            description: "event_class_credit",
+            sql: include_str!("../migrations/0009_event_class_credit.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 10,
+            description: "special_testers",
+            sql: include_str!("../migrations/0010_special_testers.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 11,
+            description: "black_belt_inventory",
+            sql: include_str!("../migrations/0011_black_belt_inventory.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 12,
+            description: "no_change_history",
+            sql: include_str!("../migrations/0012_no_change_history.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 13,
+            description: "target_rank",
+            sql: include_str!("../migrations/0013_target_rank.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -49,7 +112,7 @@ pub fn run() {
                 .add_migrations("sqlite:tkdos.db", migrations)
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![write_text_file])
+        .invoke_handler(tauri::generate_handler![write_text_file, write_bytes_file, open_path])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

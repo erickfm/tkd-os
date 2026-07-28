@@ -12,8 +12,11 @@ import {
   buildEventRosterCsv,
   getEventRoster,
   listEvents,
+  listPostedEvents,
   listStudents,
+  postEvent,
   removeFromRoster,
+  unpostEvent,
   type StudentRow,
 } from "@/db/repos";
 import type { EventRow } from "@/db/schema";
@@ -21,6 +24,7 @@ import { saveTextFile } from "@/lib/download";
 import { prettyDate } from "@/lib/format";
 
 export function EventsPage() {
+  const [view, setView] = useState<"upcoming" | "posted">("upcoming");
   const [evts, setEvts] = useState<EventRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
@@ -28,10 +32,10 @@ export function EventsPage() {
   const [detail, setDetail] = useState<EventRow | null>(null);
 
   async function load() {
-    try { setEvts(await listEvents()); }
+    try { setEvts(await (view === "upcoming" ? listEvents() : listPostedEvents())); }
     catch (e) { setError(String(e)); }
   }
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [view]);
 
   return (
     <>
@@ -41,10 +45,17 @@ export function EventsPage() {
         actions={<Button variant="primary" onClick={() => { setEditing(null); setFormOpen(true); }}><Plus size={16} />Add event</Button>}
       />
 
+      <div className="mb-4 flex gap-2">
+        <Button variant={view === "upcoming" ? "primary" : "secondary"} onClick={() => setView("upcoming")} className="px-3 py-1.5 text-xs">Upcoming</Button>
+        <Button variant={view === "posted" ? "primary" : "secondary"} onClick={() => setView("posted")} className="px-3 py-1.5 text-xs">Posted</Button>
+      </div>
+
       {error && <div className="rounded-md border border-red-500/40 bg-red-500/10 p-4 text-sm">{error}</div>}
 
       {!error && evts && evts.length === 0 && (
-        <EmptyState title="No events yet">Create a tournament, seminar, or demo to get started.</EmptyState>
+        <EmptyState title={view === "upcoming" ? "No events yet" : "No posted events yet"}>
+          {view === "upcoming" ? "Create a tournament, seminar, or demo to get started." : "Posted events will show up here once you post them."}
+        </EmptyState>
       )}
 
       {!error && evts && evts.length > 0 && (
@@ -58,7 +69,10 @@ export function EventsPage() {
                 <tr key={e.id} onClick={() => setDetail(e)} className="cursor-pointer border-t border-[var(--color-border)] hover:bg-[var(--color-surface-2)]">
                   <Td>{e.name}</Td>
                   <Td>{prettyDate(e.eventDate)}{e.eventTime ? ` · ${e.eventTime}` : ""}</Td>
-                  <Td><span className="rounded-full bg-[var(--color-surface-3)] px-2 py-0.5 text-xs">{e.eventType}</span></Td>
+                  <Td>
+                    <span className="rounded-full bg-[var(--color-surface-3)] px-2 py-0.5 text-xs">{e.eventType}</span>
+                    {e.classCredit > 1 && <span className="ml-1 rounded-full bg-[var(--color-surface-3)] px-2 py-0.5 text-xs" title={`Worth ${e.classCredit} classes`}>×{e.classCredit}</span>}
+                  </Td>
                   <Td>{e.location ?? "—"}</Td>
                 </tr>
               ))}
@@ -72,7 +86,7 @@ export function EventsPage() {
       {detail && (
         <EventDetail
           event={detail}
-          onClose={() => setDetail(null)}
+          onClose={() => { setDetail(null); load(); }}
           onEdit={() => { setEditing(detail); setDetail(null); setFormOpen(true); }}
         />
       )}
@@ -84,6 +98,8 @@ function EventDetail({ event, onClose, onEdit }: { event: EventRow; onClose: () 
   const [roster, setRoster] = useState<StudentRow[]>([]);
   const [allStudents, setAllStudents] = useState<StudentRow[]>([]);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
+  const [posted, setPosted] = useState(event.postedAt);
+  const [posting, setPosting] = useState(false);
 
   async function load() {
     const [r, all] = await Promise.all([getEventRoster(event.id), listStudents()]);
@@ -111,18 +127,49 @@ function EventDetail({ event, onClose, onEdit }: { event: EventRow; onClose: () 
     const saved = await saveTextFile(`${safe}_roster.csv`, csv);
     setExportMsg(saved ? "Roster saved." : "Export canceled.");
   }
+  async function post() {
+    const creditNote = event.classCredit > 1 ? ` (${event.classCredit} classes each)` : "";
+    if (!confirm(`Post "${event.name}"? This credits ${roster.length} registered student${roster.length === 1 ? "" : "s"}${creditNote} and moves the event to Posted.`)) return;
+    setPosting(true);
+    try {
+      await postEvent(event.id);
+      setPosted(new Date().toISOString());
+    } finally {
+      setPosting(false);
+    }
+  }
+  async function undo() {
+    setPosting(true);
+    try {
+      await unpostEvent(event.id);
+      setPosted(null);
+    } finally {
+      setPosting(false);
+    }
+  }
 
   return (
     <Drawer open onClose={onClose} title={event.name} width="max-w-2xl"
       footer={
         <div className="flex items-center justify-between">
           <Button variant="ghost" onClick={onEdit}>Edit details</Button>
-          <Button variant="secondary" onClick={exportTsv} disabled={roster.length === 0}><Download size={16} />Export roster</Button>
+          <div className="flex items-center gap-2">
+            {posted ? (
+              <>
+                <span className="text-xs text-[var(--color-fg-muted)]">Posted {prettyDate(posted.slice(0, 10))}</span>
+                <Button variant="ghost" onClick={undo} disabled={posting}>Undo</Button>
+              </>
+            ) : (
+              <Button variant="primary" onClick={post} disabled={posting || roster.length === 0}>{posting ? "Posting…" : "Post event"}</Button>
+            )}
+            <Button variant="secondary" onClick={exportTsv} disabled={roster.length === 0}><Download size={16} />Export roster</Button>
+          </div>
         </div>
       }>
       <div className="mb-4 text-sm text-[var(--color-fg-muted)]">
         {prettyDate(event.eventDate)}{event.eventTime ? ` · ${event.eventTime}` : ""} · {event.eventType}
         {event.location ? ` · ${event.location}` : ""}
+        {event.classCredit > 1 ? ` · worth ${event.classCredit} classes` : ""}
       </div>
       {event.notes && <p className="mb-4 whitespace-pre-wrap text-sm">{event.notes}</p>}
       {exportMsg && <div className="mb-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-2 text-sm">{exportMsg}</div>}
