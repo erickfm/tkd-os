@@ -1,16 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
-import { Pencil } from "lucide-react";
+import { History, Pencil } from "lucide-react";
 
 import { Drawer } from "@/components/Drawer";
 import { BeltBadge } from "@/components/BeltBadge";
 import { Button, Field, Select, TextInput, Textarea } from "@/components/ui";
-import { BELT_SIZES, NC_REASON_LABELS, type NcReason } from "@/db/enums";
+import { BELT_SIZES, GENDERS, NC_REASON_LABELS, type NcReason } from "@/db/enums";
 import type { BeltRank } from "@/db/schema";
 import {
   createStudent,
   deleteStudentPermanently,
   getProgress,
   getStudentAttendance,
+  getStudentAttendanceDetail,
   getStudentDeleteImpact,
   listNoChangeHistory,
   listRankHistory,
@@ -18,6 +19,7 @@ import {
   updateProgress,
   updateRankHistory,
   updateStudent,
+  type StudentAttendanceDetail,
   type StudentAttendanceSummary,
   type StudentInput,
   type StudentRow,
@@ -49,7 +51,7 @@ function blank(): StudentInput {
     guardian1Name: null, guardian1Phone: null, guardian1Email: null,
     guardian2Name: null, guardian2Phone: null, guardian2Email: null,
     emergencyContact: null, track: "regular", ageGroup: "jr",
-    beltRankId: 0, beltSize: null, joinDate: today(), trialStartDate: null, notes: null,
+    beltRankId: 0, beltSize: null, joinDate: today(), trialStartDate: null, notes: null, gender: null,
   };
 }
 
@@ -76,7 +78,7 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
             track: editing.track, ageGroup: editing.ageGroup,
             beltRankId: editing.beltRankId, beltSize: editing.beltSize,
             joinDate: editing.joinDate, trialStartDate: editing.trialStartDate,
-            notes: editing.notes,
+            notes: editing.notes, gender: editing.gender,
           }
         : blank(),
     );
@@ -109,6 +111,13 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
     if (!open || !editing) { setAttendance(null); return; }
     getStudentAttendance(editing.id).then(setAttendance);
   }, [open, editing]);
+
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [detail, setDetail] = useState<StudentAttendanceDetail | null>(null);
+  useEffect(() => {
+    if (!historyOpen || !editing) { setDetail(null); return; }
+    getStudentAttendanceDetail(editing.id).then(setDetail);
+  }, [historyOpen, editing]);
 
   const [history, setHistory] = useState<RankHistoryEntry[] | null>(null);
   useEffect(() => {
@@ -236,6 +245,7 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
   }
 
   return (
+    <>
     <Drawer
       open={open}
       onClose={onClose}
@@ -264,6 +274,11 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
       {error && (
         <div className="mb-3 rounded-md border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-700">
           {error}
+        </div>
+      )}
+      {editing && !editing.isActive && (
+        <div className="mb-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3 text-sm text-[var(--color-fg-muted)]">
+          Deactivated{editing.leftDate ? ` on ${prettyDate(editing.leftDate)}` : " (the date wasn't recorded)"}.
         </div>
       )}
       <div className="grid grid-cols-2 gap-x-3">
@@ -306,6 +321,16 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
         <Field label={`Date of birth${ageFromDob(form.dateOfBirth) != null ? ` · age ${ageFromDob(form.dateOfBirth)}` : ""}`}>
           <TextInput type="date" value={form.dateOfBirth ?? ""} onChange={(e) => set("dateOfBirth", e.target.value || null)} />
         </Field>
+      </div>
+
+      <div className="grid grid-cols-2 gap-x-3">
+        <Field label="Gender">
+          <Select value={form.gender ?? ""} onChange={(e) => set("gender", e.target.value || null)}>
+            <option value="">Not recorded</option>
+            {GENDERS.map((g) => <option key={g} value={g}>{g}</option>)}
+          </Select>
+        </Field>
+        <span />
       </div>
 
       <div className="grid grid-cols-2 gap-x-3">
@@ -435,7 +460,12 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
 
       {editing && attendance && (
         <div className="mt-3 rounded-md border border-[var(--color-border)] p-3">
-          <div className="mb-2 text-sm font-medium">Attendance history</div>
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-sm font-medium">Attendance history</div>
+            <Button variant="secondary" onClick={() => setHistoryOpen(true)} className="px-2 py-1 text-xs">
+              <History size={13} />Full history
+            </Button>
+          </div>
           <div className="mb-3 flex gap-6 text-sm">
             <div><span className="text-2xl font-semibold">{attendance.thisCycle}</span> <span className="text-[var(--color-fg-muted)]">current cycle</span></div>
             <div><span className="text-2xl font-semibold">{attendance.sinceLastPromotion}</span> <span className="text-[var(--color-fg-muted)]">since last promotion</span></div>
@@ -456,6 +486,93 @@ export function StudentForm({ open, onClose, onSaved, ranks, editing }: Props) {
         </div>
       )}
     </Drawer>
+    {editing && (
+      <Drawer
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        title={`Full attendance history — ${editing.firstName} ${editing.lastName}`}
+        width="max-w-2xl"
+      >
+        {!detail ? (
+          <p className="text-sm text-[var(--color-fg-muted)]">Loading…</p>
+        ) : (
+          <div className="space-y-5">
+            <div className="flex flex-wrap gap-6 text-sm">
+              <div>
+                <span className="text-2xl font-semibold">{detail.sinceLastTesting.count}</span>{" "}
+                <span className="text-[var(--color-fg-muted)]">since last testing</span>
+                {detail.sinceLastTesting.since && (
+                  <div className="text-xs text-[var(--color-fg-muted)]">since {prettyDate(detail.sinceLastTesting.since)}</div>
+                )}
+              </div>
+              <div>
+                <span className="text-2xl font-semibold">{detail.avgPerWeekCurrentCycle.toFixed(1)}</span>{" "}
+                <span className="text-[var(--color-fg-muted)]">classes/week, current cycle</span>
+              </div>
+              <div>
+                <span className="text-2xl font-semibold">{detail.avgPerWeekAllTime.toFixed(1)}</span>{" "}
+                <span className="text-[var(--color-fg-muted)]">classes/week, all time</span>
+              </div>
+            </div>
+
+            <CycleSection
+              title="Current cycle"
+              window={detail.currentCycle}
+            />
+            {detail.previousCycle ? (
+              <CycleSection title="Previous cycle" window={detail.previousCycle} />
+            ) : (
+              <div>
+                <div className="mb-1 text-sm font-medium">Previous cycle</div>
+                <p className="text-xs text-[var(--color-fg-muted)]">No completed cycle on record yet.</p>
+              </div>
+            )}
+
+            <div>
+              <div className="mb-1 text-sm font-medium">Tournaments / seminars / events ({detail.events.length})</div>
+              {detail.events.length === 0 ? (
+                <p className="text-xs text-[var(--color-fg-muted)]">None yet.</p>
+              ) : (
+                <ul className="max-h-48 overflow-auto rounded-md border border-[var(--color-border)] text-sm">
+                  {detail.events.map((e, i) => (
+                    <li key={i} className="flex justify-between border-t border-[var(--color-border)] px-2 py-1 first:border-t-0">
+                      <span>{prettyDate(e.date)}</span>
+                      <span className="text-[var(--color-fg-muted)]">{e.label}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        )}
+      </Drawer>
+    )}
+    </>
+  );
+}
+
+function CycleSection({ title, window: w }: { title: string; window: { start: string; end: string; testingDate: string | null; entries: { date: string; label: string }[]; count: number } }) {
+  return (
+    <div>
+      <div className="mb-1 flex items-baseline justify-between">
+        <span className="text-sm font-medium">{title} ({w.count})</span>
+        <span className="text-xs text-[var(--color-fg-muted)]">
+          {prettyDate(w.start)} – {prettyDate(w.testingDate ?? w.end)}
+        </span>
+      </div>
+      {w.entries.length === 0 ? (
+        <p className="text-xs text-[var(--color-fg-muted)]">No classes recorded in this window.</p>
+      ) : (
+        <ul className="max-h-48 overflow-auto rounded-md border border-[var(--color-border)] text-sm">
+          {w.entries.map((c, i) => (
+            <li key={i} className="flex justify-between border-t border-[var(--color-border)] px-2 py-1 first:border-t-0">
+              <span>{prettyDate(c.date)}</span>
+              <span className="text-[var(--color-fg-muted)]">{c.label}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

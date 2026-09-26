@@ -1,10 +1,11 @@
-import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm";
 
 import { getDb } from "./client";
 import {
   attendanceRecords,
   attendanceSessions,
   beltRanks,
+  classSlots,
   eventRoster,
   events,
   inventoryItems,
@@ -16,12 +17,44 @@ import {
   starterCourses,
   studentProgress,
   students,
+  testingCycleHistory,
   testingCycles,
   testingRegistration,
+  trialHistory,
 } from "./schema";
-import type { BeltRank, InventoryItem, InventorySection, Student, TestingCycle } from "./schema";
-import { ageFromDob, beltRankOrder, today } from "@/lib/format";
-import { CLASS_TYPE_LABELS, type NcReason } from "./enums";
+import type { BeltRank, ClassSlot, InventoryItem, InventorySection, Student, TestingCycle, TestingCycleHistory } from "./schema";
+import { ageFromDob, beltRankOrder, fullName, prettyDate, today } from "@/lib/format";
+import { addDaysIso, addMonthsIso } from "@/lib/dates";
+import {
+  TREND_WEEKS,
+  buildPyramid,
+  computeDemographics,
+  computeEnrollmentFlow,
+  computeMembership,
+  computeRetention,
+  computeSlots,
+  computeTimeInRank,
+  computeTrends,
+  schoolWeeks,
+  summarizeTrends,
+  summarizeTrials,
+  type Demographics,
+  type FlowMonth,
+  type LifecycleStudent,
+  type Membership,
+  type Pyramid,
+  type PyramidGroup,
+  type RankInfo,
+  type RankTime,
+  type RetentionResult,
+  type SlotRow,
+  type StuckStudent,
+  type TrendRow,
+  type TrendSummary,
+  type TrialSummary,
+  type WeekTotal,
+} from "@/lib/reports";
+import { CLASS_TYPE_LABELS, CLASS_TYPES, EVENT_TYPES, type NcReason } from "./enums";
 
 // ----------------------------------------------------------------------------
 // Belt ranks
@@ -185,6 +218,26 @@ export interface StudentInput {
   joinDate: string;
   trialStartDate: string | null;
   notes: string | null;
+  /** Optional so callers that don't collect it leave the stored value alone. */
+  gender?: string | null;
+}
+
+/**
+ * Keep trial_history in step with students.trial_start_date. That column is
+ * cleared when a trial ends, so this is what preserves the record: a start
+ * opens a row, an end closes it, and a corrected start date rewrites the open row.
+ */
+async function syncTrialHistory(studentId: number, before: string | null, after: string | null): Promise<void> {
+  if (before === after) return;
+  const db = await getDb();
+  const open = and(eq(trialHistory.studentId, studentId), isNull(trialHistory.endedDate));
+  if (before != null && after != null) {
+    await db.update(trialHistory).set({ startDate: after }).where(open);
+  } else if (before != null) {
+    await db.update(trialHistory).set({ endedDate: today() }).where(open);
+  } else if (after != null) {
+    await db.insert(trialHistory).values({ studentId, startDate: after });
+  }
 }
 
 export async function createStudent(input: StudentInput): Promise<number> {
@@ -195,6 +248,7 @@ export async function createStudent(input: StudentInput): Promise<number> {
     .returning({ id: students.id });
   // 1:1 progress row (spec invariant)
   await db.insert(studentProgress).values({ studentId: row.id });
+  await syncTrialHistory(row.id, null, input.trialStartDate);
   return row.id;
 }
 
@@ -203,12 +257,15 @@ export async function updateStudent(
   input: StudentInput,
 ): Promise<void> {
   const db = await getDb();
+  const [current] = await db.select({ trial: students.trialStartDate }).from(students).where(eq(students.id, id));
   await db
     .update(students)
     .set({ ...input, isStarterStudent: input.trialStartDate != null, updatedAt: sql`CURRENT_TIMESTAMP` })
     .where(eq(students.id, id));
+  await syncTrialHistory(id, current?.trial ?? null, input.trialStartDate);
 }
 
+/** Deactivating records today as the date they left (kept if already set); reactivating clears it. */
 export async function setStudentActive(
   id: number,
   active: boolean,
@@ -216,8 +273,17 @@ export async function setStudentActive(
   const db = await getDb();
   await db
     .update(students)
-    .set({ isActive: active, updatedAt: sql`CURRENT_TIMESTAMP` })
+    .set({
+      isActive: active,
+      leftDate: active ? null : sql`coalesce(${students.leftDate}, ${today()})`,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
     .where(eq(students.id, id));
+}
+
+export async function setStudentGender(id: number, gender: string | null): Promise<void> {
+  const db = await getDb();
+  await db.update(students).set({ gender, updatedAt: sql`CURRENT_TIMESTAMP` }).where(eq(students.id, id));
 }
 
 export interface StudentDeleteImpact {
@@ -263,6 +329,7 @@ export async function deleteStudentPermanently(studentId: number): Promise<void>
   await db.delete(testingRegistration).where(eq(testingRegistration.studentId, studentId));
   await db.delete(specialTesters).where(eq(specialTesters.studentId, studentId));
   await db.delete(starterCourseEnrollment).where(eq(starterCourseEnrollment.studentId, studentId));
+  await db.delete(trialHistory).where(eq(trialHistory.studentId, studentId));
   await db.delete(studentProgress).where(eq(studentProgress.studentId, studentId));
   await db.delete(students).where(eq(students.id, studentId));
 }
@@ -643,6 +710,35 @@ export async function updateCycle(
     .where(eq(testingCycles.id, id));
 }
 
+/**
+ * Pre-set the upcoming cycle's dates ahead of time. promoteCycle() applies
+ * these (instead of a 90-day placeholder guess) when it rolls the current
+ * cycle forward, then clears them back to null.
+ */
+export async function updateNextCycleDates(
+  id: number,
+  nextStartDate: string | null,
+  nextEndDate: string | null,
+  nextTestingDate: string | null,
+): Promise<void> {
+  const db = await getDb();
+  await db
+    .update(testingCycles)
+    .set({ nextStartDate, nextEndDate, nextTestingDate, updatedAt: sql`CURRENT_TIMESTAMP` })
+    .where(eq(testingCycles.id, id));
+}
+
+/** Most recently completed cycle's dates, or null if none has rolled over yet. */
+export async function getPreviousCycle(): Promise<TestingCycleHistory | null> {
+  const db = await getDb();
+  const [row] = await db
+    .select()
+    .from(testingCycleHistory)
+    .orderBy(desc(testingCycleHistory.id))
+    .limit(1);
+  return row ?? null;
+}
+
 /** Minimum classes a student must attend in a cycle to be eligible to test. */
 export function minClassesToTest(rank: BeltRank): number {
   if (rank.track === "tiger") return 6;
@@ -864,12 +960,15 @@ export async function getCycleCandidates(cycleId: number): Promise<CandidateRow[
  * promotion should be recorded as earned on testing day itself.
  *
  * Also rolls the cycle's date window forward so class counts reset for
- * everyone (not just the students who tested): the new start date is the day
- * after this cycle's testing date, with a 90-day placeholder end date and no
- * testing date, until staff sets the real dates for the next cycle via the
- * Cycle start/end/testing fields. Rolls whenever a testing date was set —
- * even if the roster is now empty (e.g. everyone left was marked No Change) —
- * but not for an untouched cycle that never had a testing date scheduled.
+ * everyone (not just the students who tested), and logs the just-finished
+ * cycle's dates to testing_cycle_history (the "previous cycle" record, since
+ * this row is reused/edited in place). If staff pre-set the next cycle's
+ * dates (Next cycle fields), those are used for the new window; otherwise it
+ * falls back to a 90-day placeholder end date and no testing date, same as
+ * before, until staff sets the real dates by hand. Rolls whenever a testing
+ * date was set — even if the roster is now empty (e.g. everyone left was
+ * marked No Change) — but not for an untouched cycle that never had a
+ * testing date scheduled.
  */
 export async function promoteCycle(cycleId: number): Promise<PromotionResult[]> {
   const cycle = await getCycleById(cycleId);
@@ -885,8 +984,15 @@ export async function promoteCycle(cycleId: number): Promise<PromotionResult[]> 
     .where(eq(testingRegistration.cycleId, cycleId));
 
   if (cycle.testingDate) {
-    const newStart = addDays(cycle.testingDate, 1);
-    await updateCycle(cycleId, newStart, addDays(newStart, 90), null);
+    await db.insert(testingCycleHistory).values({
+      startDate: cycle.startDate,
+      endDate: cycle.endDate,
+      testingDate: cycle.testingDate,
+    });
+    const newStart = cycle.nextStartDate ?? addDays(cycle.testingDate, 1);
+    const newEnd = cycle.nextEndDate ?? addDays(newStart, 90);
+    await updateCycle(cycleId, newStart, newEnd, cycle.nextTestingDate ?? null);
+    await updateNextCycleDates(cycleId, null, null, null);
   }
 
   return results;
@@ -966,6 +1072,52 @@ export async function buildBeltLabelsHtml(cycleId: number): Promise<string> {
   }
 </style></head>
 <body>${sheets}</body></html>`;
+}
+
+/**
+ * Print-ready HTML of every active student's attendance in the current cycle's
+ * date window — a quick look at who's on track before testing without opening
+ * each profile, grouped/ordered the same way as the other cycle exports.
+ * Below-minimum students are shaded so they stand out at a glance.
+ */
+export async function buildAttendanceReportHtml(cycleId: number): Promise<string> {
+  const cycle = await getCycleById(cycleId);
+  const rows = (await getCycleCandidates(cycleId)).slice().sort(compareForExport);
+  const asOfLabel = prettyDate(cycle.testingDate ?? cycle.endDate);
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const short = rows.filter((s) => !s.meetsMinimum).length;
+  const tr = (s: CandidateRow) => `
+      <tr class="${s.meetsMinimum ? "" : "short"}">
+        <td>${esc(`${s.firstName} ${s.lastName}`)}</td>
+        <td>${esc(s.rank.name)}</td>
+        <td class="num">${s.attendanceThisCycle}</td>
+        <td class="num">${s.minClasses}</td>
+        <td class="status">${s.meetsMinimum ? "✓" : ""}</td>
+      </tr>`;
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>Attendance — ${esc(prettyDate(cycle.startDate))} to ${esc(asOfLabel)}</title>
+<style>
+  @page { size: letter; margin: 0.5in; }
+  * { box-sizing: border-box; }
+  body { font-family: Arial, Helvetica, sans-serif; margin: 0; color: #111; }
+  h1 { font-size: 16pt; margin: 0 0 2px; }
+  .subtitle { font-size: 10pt; color: #444; margin: 0 0 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: 10.5pt; }
+  th, td { border: 1px solid #999; padding: 4px 8px; text-align: left; }
+  th { background: #eee; }
+  td.num, td.status { text-align: center; width: 1%; white-space: nowrap; }
+  tr.short { background: #fdeaea; }
+  tr.short td { font-weight: 700; }
+  @media screen { body { padding: 24px; } }
+</style></head>
+<body>
+  <h1>Attendance — Current Testing Cycle</h1>
+  <p class="subtitle">${esc(prettyDate(cycle.startDate))} through ${esc(asOfLabel)} · ${rows.length} active student${rows.length === 1 ? "" : "s"}, ${short} below the class minimum · printed ${esc(prettyDate(today()))}</p>
+  <table>
+    <thead><tr><th>Name</th><th>Belt</th><th class="num">Classes</th><th class="num">Min</th><th class="status">Met</th></tr></thead>
+    <tbody>${rows.map(tr).join("")}</tbody>
+  </table>
+</body></html>`;
 }
 
 /** CSV export of the testing list: name, age, belt, testing-for, size, classes. */
@@ -1473,8 +1625,8 @@ export interface StudentAttendanceSummary {
   recent: { date: string; label: string }[];
 }
 
-/** A student's present-class + posted-event history (most recent first) + totals. */
-export async function getStudentAttendance(studentId: number): Promise<StudentAttendanceSummary> {
+/** A student's present classes + posted events, each dated and credited (event credit may be >1). */
+async function studentAttendanceRows(studentId: number) {
   const db = await getDb();
   const classRows = await db
     .select({ date: attendanceSessions.sessionDate, classType: attendanceSessions.classType })
@@ -1501,6 +1653,12 @@ export async function getStudentAttendance(studentId: number): Promise<StudentAt
     })),
   ].sort((a, b) => b.date.localeCompare(a.date));
 
+  return { eventRows, combined };
+}
+
+/** A student's present-class + posted-event history (most recent first) + totals. */
+export async function getStudentAttendance(studentId: number): Promise<StudentAttendanceSummary> {
+  const { combined } = await studentAttendanceRows(studentId);
   const total = combined.reduce((sum, r) => sum + r.credit, 0);
   const sinceLastPromotion = await classesSincePromotion(studentId);
   const cycle = await getCurrentCycle();
@@ -1508,19 +1666,79 @@ export async function getStudentAttendance(studentId: number): Promise<StudentAt
   return { total, thisCycle, sinceLastPromotion, recent: combined.map(({ date, label }) => ({ date, label })) };
 }
 
-/** Count of present classes + posted-event credit since the student's last promotion. */
-export async function classesSincePromotion(studentId: number): Promise<number> {
-  const db = await getDb();
-  const [last] = await db
-    .select({ d: sql<string>`max(${rankHistory.promotionDate})` })
-    .from(rankHistory)
-    .where(eq(rankHistory.studentId, studentId));
+export interface CycleWindowSummary {
+  start: string;
+  end: string;
+  testingDate: string | null;
+  entries: { date: string; label: string }[];
+  count: number;
+}
 
+export interface StudentAttendanceDetail {
+  currentCycle: CycleWindowSummary;
+  previousCycle: CycleWindowSummary | null;
+  sinceLastTesting: { count: number; since: string | null };
+  events: { date: string; label: string }[];
+  totalClasses: number;
+  avgPerWeekCurrentCycle: number;
+  avgPerWeekAllTime: number;
+}
+
+/**
+ * Full attendance breakdown for a student's expanded history view: current
+ * and previous testing-cycle windows, classes since their last testing
+ * (promotion or No Change), lifetime events, and weekly-average pace.
+ */
+export async function getStudentAttendanceDetail(studentId: number): Promise<StudentAttendanceDetail> {
+  const db = await getDb();
+  const { eventRows, combined } = await studentAttendanceRows(studentId);
+
+  const windowSummary = (start: string, end: string, testingDate: string | null): CycleWindowSummary => {
+    const cutoff = testingDate ?? end;
+    const entries = combined.filter((c) => c.date >= start && c.date <= cutoff);
+    return {
+      start,
+      end,
+      testingDate,
+      entries: entries.map(({ date, label }) => ({ date, label })),
+      count: entries.reduce((sum, e) => sum + e.credit, 0),
+    };
+  };
+
+  const cycle = await getCurrentCycle();
+  const currentCycle = windowSummary(cycle.startDate, cycle.endDate, cycle.testingDate);
+
+  const prev = await getPreviousCycle();
+  const previousCycle = prev ? windowSummary(prev.startDate, prev.endDate, prev.testingDate) : null;
+
+  const [student] = await db.select({ joinDate: students.joinDate }).from(students).where(eq(students.id, studentId));
+  const totalClasses = combined.reduce((sum, r) => sum + r.credit, 0);
+  // Rate so far this cycle: elapsed time (start -> today, capped at the
+  // cycle's own cutoff), not the full nominal window -- the cutoff is often a
+  // future testing date, which would understate the pace for an in-progress cycle.
+  const elapsedEnd = [today(), currentCycle.testingDate ?? currentCycle.end].sort()[0];
+  const avgPerWeekCurrentCycle = currentCycle.count / Math.max(daysBetween(currentCycle.start, elapsedEnd) / 7, 1);
+  const avgPerWeekAllTime = totalClasses / Math.max(daysBetween(student.joinDate, today()) / 7, 1);
+
+  return {
+    currentCycle,
+    previousCycle,
+    sinceLastTesting: await classesSinceLastTesting(studentId),
+    events: eventRows.map((r) => ({ date: r.date, label: r.credit > 1 ? `${r.name} (+${r.credit} classes)` : r.name })),
+    totalClasses,
+    avgPerWeekCurrentCycle,
+    avgPerWeekAllTime,
+  };
+}
+
+/** Count of present classes + posted-event credit after `since` (or all-time if null). */
+async function countPresentSince(studentId: number, since: string | null): Promise<number> {
+  const db = await getDb();
   const conds = [
     eq(attendanceRecords.studentId, studentId),
     eq(attendanceRecords.status, "present"),
   ];
-  if (last?.d) conds.push(gt(attendanceSessions.sessionDate, last.d));
+  if (since) conds.push(gt(attendanceSessions.sessionDate, since));
   const [row] = await db
     .select({ n: sql<number>`count(*)` })
     .from(attendanceRecords)
@@ -1531,7 +1749,7 @@ export async function classesSincePromotion(studentId: number): Promise<number> 
     .where(and(...conds));
 
   const eventConds = [eq(eventRoster.studentId, studentId), isNotNull(events.postedAt)];
-  if (last?.d) eventConds.push(gt(events.eventDate, last.d));
+  if (since) eventConds.push(gt(events.eventDate, since));
   const [eventRow] = await db
     .select({ n: sql<number>`sum(${events.classCredit})` })
     .from(eventRoster)
@@ -1539,6 +1757,36 @@ export async function classesSincePromotion(studentId: number): Promise<number> 
     .where(and(...eventConds));
 
   return Number(row?.n ?? 0) + Number(eventRow?.n ?? 0);
+}
+
+/** Count of present classes + posted-event credit since the student's last promotion. */
+export async function classesSincePromotion(studentId: number): Promise<number> {
+  const db = await getDb();
+  const [last] = await db
+    .select({ d: sql<string>`max(${rankHistory.promotionDate})` })
+    .from(rankHistory)
+    .where(eq(rankHistory.studentId, studentId));
+  return countPresentSince(studentId, last?.d ?? null);
+}
+
+/**
+ * Count of present classes + posted-event credit since the student last
+ * actually tested — a promotion OR a No Change, whichever is more recent.
+ * Differs from classesSincePromotion for a No Change student: they tested
+ * (and the clock should reset) but didn't get a new rank_history row.
+ */
+export async function classesSinceLastTesting(studentId: number): Promise<{ count: number; since: string | null }> {
+  const db = await getDb();
+  const [promoted] = await db
+    .select({ d: sql<string>`max(${rankHistory.promotionDate})` })
+    .from(rankHistory)
+    .where(eq(rankHistory.studentId, studentId));
+  const [noChange] = await db
+    .select({ d: sql<string>`max(${noChangeHistory.testDate})` })
+    .from(noChangeHistory)
+    .where(eq(noChangeHistory.studentId, studentId));
+  const since = [promoted?.d, noChange?.d].filter((d): d is string => Boolean(d)).sort().pop() ?? null;
+  return { count: await countPresentSince(studentId, since), since };
 }
 
 // ----------------------------------------------------------------------------
@@ -1634,6 +1882,8 @@ export interface TrialRow extends StudentRow {
 /** Put a student on a trial (start date) or take them off it (null). */
 export async function setTrial(studentId: number, startDate: string | null): Promise<void> {
   const db = await getDb();
+  const [current] = await db.select({ trial: students.trialStartDate }).from(students).where(eq(students.id, studentId));
+  await syncTrialHistory(studentId, current?.trial ?? null, startDate);
   await db
     .update(students)
     .set({ trialStartDate: startDate, isStarterStudent: startDate != null, updatedAt: sql`CURRENT_TIMESTAMP` })
@@ -1852,10 +2102,921 @@ export async function addInventoryItems(
   return ids;
 }
 
+/** Zero out every item's inStock or toOrder count within one section. */
+export async function clearInventoryColumn(
+  sectionId: number,
+  field: "inStock" | "toOrder",
+): Promise<void> {
+  const db = await getDb();
+  await db
+    .update(inventoryItems)
+    .set({ [field]: 0, updatedAt: sql`CURRENT_TIMESTAMP` })
+    .where(eq(inventoryItems.sectionId, sectionId));
+  await touchSection(sectionId);
+}
+
 export async function deleteInventoryItem(itemId: number): Promise<void> {
   const db = await getDb();
   const [item] = await db.select().from(inventoryItems).where(eq(inventoryItems.id, itemId));
   if (!item) return;
   await db.delete(inventoryItems).where(eq(inventoryItems.id, itemId));
   await touchSection(item.sectionId);
+}
+
+// ----------------------------------------------------------------------------
+// Statistics
+// ----------------------------------------------------------------------------
+
+function mean(nums: number[]): number | null {
+  return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : null;
+}
+
+function median(nums: number[]): number | null {
+  if (nums.length === 0) return null;
+  const sorted = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/** "Tiger Cubs" / "Jr." / "Adult" bucket for age & tenure breakdowns. */
+function studentGroup(s: Pick<Student, "track" | "ageGroup">): string {
+  if (s.track === "tiger") return "Tiger Cubs";
+  return s.ageGroup === "adult" ? "Adult" : "Jr.";
+}
+
+export type TrackFilter = "all" | "tiger" | "regular";
+export type AgeGroupFilter = "all" | "jr" | "adult";
+
+/**
+ * Shared filter for the Statistics tab. Each stats function only reads the
+ * fields relevant to it (e.g. classTypes is ignored by roster/event stats) so
+ * one filter object can drive every section, and two of them side by side
+ * ("Period A" / "Period B") drive the compare view.
+ */
+export interface StatsFilter {
+  start: string;
+  end: string;
+  classTypes: string[]; // empty = all class types
+  track: TrackFilter;
+  ageGroup: AgeGroupFilter;
+}
+
+function matchesRosterFilter(s: Pick<StudentRow, "track" | "ageGroup">, f: Pick<StatsFilter, "track" | "ageGroup">): boolean {
+  if (f.track !== "all" && s.track !== f.track) return false;
+  if (f.ageGroup !== "all") {
+    if (s.track === "tiger") return false; // Tiger Cubs aren't Jr. or Adult
+    if (s.ageGroup !== f.ageGroup) return false;
+  }
+  return true;
+}
+
+export interface GroupStat {
+  group: string;
+  count: number;
+  avg: number | null;
+  median: number | null;
+}
+
+export interface RankDistributionRow {
+  rankId: number;
+  name: string;
+  sortOrder: number;
+  count: number;
+}
+
+export interface RosterStats {
+  activeTotal: number;
+  totalEverEnrolled: number;
+  byTrack: { track: string; label: string; count: number }[];
+  ageOverall: GroupStat;
+  ageByGroup: GroupStat[];
+  membershipYearsOverall: GroupStat;
+  membershipYearsByGroup: GroupStat[];
+  beltDistribution: { track: string; label: string; rows: RankDistributionRow[] }[];
+  avgRankPosition: { track: string; label: string; avgPosition: number; totalRanks: number; nearestRankName: string }[];
+  trialRetention: { everTrial: number; stillActive: number; rate: number | null };
+  enrollmentByMonth: { key: string; label: string; count: number }[];
+}
+
+/**
+ * Roster-wide demographics for the Statistics tab: age, membership tenure,
+ * belt distribution, and enrollment trend. Age/tenure are also split into
+ * Tiger Cubs / Jr. / Adult groups since a single blended average across a
+ * 4-year-old's age and an adult's age isn't very meaningful on its own.
+ * `filter.track`/`filter.ageGroup` scope everything except `byTrack`, which
+ * stays a whole-school reference number regardless of the filter. `filter.start`/
+ * `filter.end` scope the enrollment trend and which trial starts count toward
+ * retention; they don't affect the (inherently point-in-time) roster snapshot.
+ */
+export async function getRosterStats(filter: StatsFilter): Promise<RosterStats> {
+  const everyone = await listStudents(); // every student ever, any status
+  const activeUnfiltered = everyone.filter((s) => s.isActive);
+  const all = everyone.filter((s) => matchesRosterFilter(s, filter));
+  const active = all.filter((s) => s.isActive);
+  const t = today();
+  const groupNames = ["Tiger Cubs", "Jr.", "Adult"];
+
+  const ageYears = (s: StudentRow) => ageFromDob(s.dateOfBirth);
+  const tenureYears = (s: StudentRow) => daysBetween(s.joinDate, t) / 365.25;
+
+  const groupStats = (pick: (s: StudentRow) => number | null): GroupStat[] =>
+    groupNames.map((group) => {
+      const nums = active.filter((s) => studentGroup(s) === group).map(pick).filter((n): n is number => n != null);
+      return { group, count: nums.length, avg: mean(nums), median: median(nums) };
+    });
+
+  const ageNums = active.map(ageYears).filter((n): n is number => n != null);
+  const tenureNums = active.map(tenureYears);
+
+  const ranks = await listBeltRanks();
+  // An age-group filter always excludes Tiger Cubs (see matchesRosterFilter), so
+  // don't show an always-empty Tiger Cubs card in that case.
+  const tracksToShow: ("tiger" | "regular")[] =
+    filter.ageGroup !== "all" ? ["regular"] : filter.track === "all" ? ["tiger", "regular"] : [filter.track];
+  const beltDistribution = tracksToShow.map((track) => {
+    const trackRanks = ranks.filter((r) => r.track === track).sort((a, b) => a.sortOrder - b.sortOrder);
+    const countByRank = new Map<number, number>();
+    for (const s of active) if (s.track === track) countByRank.set(s.beltRankId, (countByRank.get(s.beltRankId) ?? 0) + 1);
+    return {
+      track,
+      label: track === "tiger" ? "Tiger Cubs" : "Jr./Adult",
+      rows: trackRanks.map((r) => ({ rankId: r.id, name: r.name, sortOrder: r.sortOrder, count: countByRank.get(r.id) ?? 0 })),
+    };
+  });
+
+  const avgRankPosition = beltDistribution.map(({ track, label, rows }) => {
+    const totalStudents = rows.reduce((sum, r) => sum + r.count, 0);
+    const avgPosition = totalStudents > 0 ? rows.reduce((sum, r) => sum + r.sortOrder * r.count, 0) / totalStudents : 0;
+    const nearest = rows.reduce((best, r) => (Math.abs(r.sortOrder - avgPosition) < Math.abs(best.sortOrder - avgPosition) ? r : best), rows[0]);
+    return { track, label, avgPosition, totalRanks: rows.length, nearestRankName: nearest?.name ?? "—" };
+  });
+
+  const everTrial = all.filter((s) => {
+    if (s.trialStartDate != null) return s.trialStartDate >= filter.start && s.trialStartDate <= filter.end;
+    return s.isStarterStudent; // legacy row with no recorded start date -- can't range-filter it, so just include it
+  });
+  const trialRetention = {
+    everTrial: everTrial.length,
+    stillActive: everTrial.filter((s) => s.isActive).length,
+    rate: everTrial.length ? everTrial.filter((s) => s.isActive).length / everTrial.length : null,
+  };
+
+  const monthKeys = monthKeysBetween(filter.start, filter.end);
+  const enrollmentByMonth = monthKeys.map((key) => ({
+    key,
+    label: monthLabel(key),
+    count: all.filter((s) => s.joinDate.slice(0, 7) === key).length,
+  }));
+
+  return {
+    activeTotal: active.length,
+    totalEverEnrolled: all.length,
+    byTrack: [
+      { track: "tiger", label: "Tiger Cubs", count: activeUnfiltered.filter((s) => s.track === "tiger").length },
+      { track: "regular", label: "Jr./Adult", count: activeUnfiltered.filter((s) => s.track === "regular").length },
+    ],
+    ageOverall: { group: "All active", count: ageNums.length, avg: mean(ageNums), median: median(ageNums) },
+    ageByGroup: groupStats(ageYears),
+    membershipYearsOverall: { group: "All active", count: tenureNums.length, avg: mean(tenureNums), median: median(tenureNums) },
+    membershipYearsByGroup: groupStats(tenureYears),
+    beltDistribution,
+    avgRankPosition,
+    trialRetention,
+    enrollmentByMonth,
+  };
+}
+
+const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+// Display Monday through Sunday (a dojang's week runs Mon-Sat with Sunday off, so
+// Sunday reads more naturally last than first).
+const DAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
+// Defensive cap on generated month/week buckets -- these ranges come from a
+// plain <input type="date"> pair, so a mis-typed year (e.g. "9999") shouldn't
+// be able to spin the loop below into generating tens of thousands of keys.
+const MAX_PERIOD_BUCKETS = 1200;
+
+function localDate(iso: string): Date {
+  return new Date(iso + "T00:00:00");
+}
+
+/** The Monday on or before `iso`, as an ISO date string. */
+function mondayOf(iso: string): string {
+  const dow = localDate(iso).getDay(); // 0=Sun..6=Sat
+  return addDays(iso, dow === 0 ? -6 : 1 - dow);
+}
+
+/** Every "YYYY-MM" month key from `start` through `end`, inclusive. */
+function monthKeysBetween(start: string, end: string): string[] {
+  if (end < start) return [];
+  const [sy, sm] = start.split("-").map(Number);
+  const [ey, em] = end.split("-").map(Number);
+  const keys: string[] = [];
+  let y = sy, m = sm;
+  while ((y < ey || (y === ey && m <= em)) && keys.length < MAX_PERIOD_BUCKETS) {
+    keys.push(`${y}-${String(m).padStart(2, "0")}`);
+    m += 1;
+    if (m > 12) { m = 1; y += 1; }
+  }
+  return keys;
+}
+function monthLabel(key: string): string {
+  const [y, m] = key.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: "short", year: "numeric" });
+}
+/** Every Monday from `start`'s week through `end`'s week, inclusive. */
+function weekKeysBetween(start: string, end: string): string[] {
+  if (end < start) return [];
+  const lastMonday = mondayOf(end);
+  const keys: string[] = [];
+  let cur = mondayOf(start);
+  while (cur <= lastMonday && keys.length < MAX_PERIOD_BUCKETS) {
+    keys.push(cur);
+    cur = addDays(cur, 7);
+  }
+  return keys;
+}
+function weekLabel(mondayIso: string): string {
+  return `Wk of ${localDate(mondayIso).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+}
+
+export interface RateRow {
+  key: string;
+  label: string;
+  sessions: number;
+  present: number;
+  avgPerSession: number;
+}
+
+export interface ClassDayRow {
+  classType: string;
+  classLabel: string;
+  day: string;
+  sessions: number;
+  present: number;
+  avgPerSession: number;
+}
+
+export interface AttendanceStats {
+  byMonth: RateRow[];
+  byWeek: RateRow[];
+  byClassType: RateRow[];
+  byDayOfWeek: RateRow[];
+  classByDay: ClassDayRow[];
+}
+
+function classLabel(classType: string): string {
+  return classType === "legacy" ? "Legacy (imported)" : CLASS_TYPE_LABELS[classType as ClassType] ?? classType;
+}
+
+/** Natural class progression (Tiger -> Jr -> Adult -> Private), legacy last, for display ordering. */
+function classTypeSortKey(classType: string): number {
+  const i = CLASS_TYPES.indexOf(classType as ClassType);
+  return i === -1 ? CLASS_TYPES.length : i;
+}
+
+/**
+ * Attendance breakdowns for the Statistics tab, all scoped to `filter.start`..
+ * `filter.end` and (if non-empty) `filter.classTypes`: monthly and weekly
+ * trends spanning the range, by class type, by day of week, and the
+ * class-type x day-of-week combination (which class runs strongest on which day).
+ */
+export async function getAttendanceStats(filter: StatsFilter): Promise<AttendanceStats> {
+  const db = await getDb();
+  const conds = [gte(attendanceSessions.sessionDate, filter.start), lte(attendanceSessions.sessionDate, filter.end)];
+  if (filter.classTypes.length) conds.push(inArray(attendanceSessions.classType, filter.classTypes));
+  const sessions = await db
+    .select({ id: attendanceSessions.id, date: attendanceSessions.sessionDate, classType: attendanceSessions.classType })
+    .from(attendanceSessions)
+    .where(and(...conds));
+  const presentRows = await db
+    .select({ sessionId: attendanceRecords.sessionId, n: sql<number>`count(*)` })
+    .from(attendanceRecords)
+    .where(eq(attendanceRecords.status, "present"))
+    .groupBy(attendanceRecords.sessionId);
+  const presentBySession = new Map(presentRows.map((r) => [r.sessionId, Number(r.n)]));
+
+  const rows = sessions.map((s) => ({
+    date: s.date,
+    classType: s.classType,
+    present: presentBySession.get(s.id) ?? 0,
+  }));
+
+  const aggregate = (
+    keyFn: (r: (typeof rows)[number]) => string,
+    labelFn: (key: string) => string,
+    keys?: string[],
+  ): RateRow[] => {
+    const byKey = new Map<string, { sessions: number; present: number }>();
+    for (const r of rows) {
+      const k = keyFn(r);
+      const cur = byKey.get(k) ?? { sessions: 0, present: 0 };
+      cur.sessions += 1;
+      cur.present += r.present;
+      byKey.set(k, cur);
+    }
+    const outKeys = keys ?? [...byKey.keys()].sort();
+    return outKeys.map((k) => {
+      const v = byKey.get(k) ?? { sessions: 0, present: 0 };
+      return { key: k, label: labelFn(k), sessions: v.sessions, present: v.present, avgPerSession: v.sessions ? v.present / v.sessions : 0 };
+    });
+  };
+
+  const byMonth = aggregate((r) => r.date.slice(0, 7), monthLabel, monthKeysBetween(filter.start, filter.end));
+  const byWeek = aggregate((r) => mondayOf(r.date), weekLabel, weekKeysBetween(filter.start, filter.end));
+  const classTypesPresent = [...new Set(rows.map((r) => r.classType))].sort((a, b) => classTypeSortKey(a) - classTypeSortKey(b));
+  const byClassType = aggregate((r) => r.classType, classLabel, classTypesPresent);
+  const byDayOfWeek = aggregate(
+    (r) => String(localDate(r.date).getDay()),
+    (k) => DAY_NAMES[Number(k)],
+    DAY_ORDER.map(String),
+  );
+
+  const classByDayMap = new Map<string, { sessions: number; present: number }>();
+  for (const r of rows) {
+    const k = `${r.classType}|${localDate(r.date).getDay()}`;
+    const cur = classByDayMap.get(k) ?? { sessions: 0, present: 0 };
+    cur.sessions += 1;
+    cur.present += r.present;
+    classByDayMap.set(k, cur);
+  }
+  const classByDay: ClassDayRow[] = [];
+  for (const classType of classTypesPresent) {
+    for (const dow of DAY_ORDER) {
+      const v = classByDayMap.get(`${classType}|${dow}`) ?? { sessions: 0, present: 0 };
+      classByDay.push({
+        classType,
+        classLabel: classLabel(classType),
+        day: DAY_NAMES[dow],
+        sessions: v.sessions,
+        present: v.present,
+        avgPerSession: v.sessions ? v.present / v.sessions : 0,
+      });
+    }
+  }
+
+  return { byMonth, byWeek, byClassType, byDayOfWeek, classByDay };
+}
+
+export interface SizeStat {
+  count: number;
+  avg: number | null;
+  median: number | null;
+  sizes: number[];
+}
+
+function sizeStat(sizes: number[]): SizeStat {
+  return { count: sizes.length, avg: mean(sizes), median: median(sizes), sizes };
+}
+
+/** A date with at least this many students promoted or marked No Change counts as a testing day; fewer is a make-up or individual promotion. */
+export const MIN_TESTING_SIZE = 20;
+
+export interface EventStats {
+  /** Students promoted or marked No Change on the same day, for testing days only (MIN_TESTING_SIZE+ students). */
+  testingSize: SizeStat;
+  /** Dates with promotions but too few students to be a testing (make-ups, late tests, individual promotions). */
+  smallerPromotionDates: { dates: number; students: number };
+  promotionRate: { promoted: number; noChange: number; rate: number | null };
+  eventSizeByType: { eventType: string; stat: SizeStat }[];
+}
+
+/**
+ * Testing and event size stats within `filter.start`..`filter.end`. Testing
+ * size has no direct roster to count (belt testing isn't an event type --
+ * see docs/schema.md), so it's inferred by grouping rank_history promotions +
+ * no_change_history rows by date, counting each student once per date (a Tiger
+ * Cub graduating is two rows). Only dates with MIN_TESTING_SIZE+ students count
+ * as a testing: the history is full of one-off promotions on their own dates,
+ * which would otherwise drag the average and median far below a real testing's
+ * size. Event size (tournaments, seminars, etc.) uses posted events' roster counts.
+ */
+export async function getEventStats(filter: StatsFilter): Promise<EventStats> {
+  const db = await getDb();
+
+  const promotions = await db
+    .select({ studentId: rankHistory.studentId, date: rankHistory.promotionDate })
+    .from(rankHistory)
+    .where(and(gte(rankHistory.promotionDate, filter.start), lte(rankHistory.promotionDate, filter.end)));
+  const noChanges = await db
+    .select({ studentId: noChangeHistory.studentId, date: noChangeHistory.testDate })
+    .from(noChangeHistory)
+    .where(and(gte(noChangeHistory.testDate, filter.start), lte(noChangeHistory.testDate, filter.end)));
+  const promoted = new Set(promotions.map((p) => `${p.studentId}|${p.date}`));
+  const noChange = new Set(noChanges.map((n) => `${n.studentId}|${n.date}`));
+  const processedByDate = new Map<string, Set<number>>();
+  for (const p of [...promotions, ...noChanges]) {
+    if (!processedByDate.has(p.date)) processedByDate.set(p.date, new Set());
+    processedByDate.get(p.date)!.add(p.studentId);
+  }
+  const sizes = [...processedByDate.values()].map((set) => set.size);
+  const testingSize = sizeStat(sizes.filter((n) => n >= MIN_TESTING_SIZE));
+  const smaller = sizes.filter((n) => n < MIN_TESTING_SIZE);
+  const smallerPromotionDates = { dates: smaller.length, students: smaller.reduce((a, n) => a + n, 0) };
+
+  const promotionRate = {
+    promoted: promoted.size,
+    noChange: noChange.size,
+    rate: promoted.size + noChange.size > 0 ? promoted.size / (promoted.size + noChange.size) : null,
+  };
+
+
+  const postedEvents = await db
+    .select({ id: events.id, eventType: events.eventType })
+    .from(events)
+    .where(and(isNotNull(events.postedAt), gte(events.eventDate, filter.start), lte(events.eventDate, filter.end)));
+  const rosterCounts = await db
+    .select({ eventId: eventRoster.eventId, n: sql<number>`count(*)` })
+    .from(eventRoster)
+    .groupBy(eventRoster.eventId);
+  const countByEvent = new Map(rosterCounts.map((r) => [r.eventId, Number(r.n)]));
+
+  const sizesByType = new Map<string, number[]>();
+  for (const e of postedEvents) {
+    if (!sizesByType.has(e.eventType)) sizesByType.set(e.eventType, []);
+    sizesByType.get(e.eventType)!.push(countByEvent.get(e.id) ?? 0);
+  }
+  const eventTypeSortKey = (t: string) => {
+    const i = (EVENT_TYPES as readonly string[]).indexOf(t);
+    return i === -1 ? EVENT_TYPES.length : i;
+  };
+  const eventSizeByType = [...sizesByType.entries()]
+    .sort(([a], [b]) => eventTypeSortKey(a) - eventTypeSortKey(b))
+    .map(([eventType, sizes]) => ({ eventType, stat: sizeStat(sizes) }));
+
+  return { testingSize, smallerPromotionDates, promotionRate, eventSizeByType };
+}
+
+/** Earliest date with any real activity (attendance, enrollment, or events) -- backs the "All time" range preset. */
+export async function getEarliestActivityDate(): Promise<string> {
+  const db = await getDb();
+  const [a] = await db.select({ d: sql<string | null>`min(${attendanceSessions.sessionDate})` }).from(attendanceSessions);
+  const [b] = await db.select({ d: sql<string | null>`min(${students.joinDate})` }).from(students);
+  const [c] = await db.select({ d: sql<string | null>`min(${events.eventDate})` }).from(events);
+  const dates = [a?.d, b?.d, c?.d].filter((d): d is string => Boolean(d));
+  return dates.length ? dates.sort()[0] : today();
+}
+
+// ----------------------------------------------------------------------------
+// Class slots (optional schedule details: start time + capacity per class x weekday)
+// ----------------------------------------------------------------------------
+
+export async function listClassSlots(): Promise<ClassSlot[]> {
+  const db = await getDb();
+  return db.select().from(classSlots).orderBy(asc(classSlots.weekday), asc(classSlots.startTime));
+}
+
+/** Add or update the slot for (classType, weekday). */
+export async function saveClassSlot(slot: {
+  classType: string;
+  weekday: number;
+  startTime: string | null;
+  capacity: number | null;
+}): Promise<void> {
+  const db = await getDb();
+  await db
+    .insert(classSlots)
+    .values(slot)
+    .onConflictDoUpdate({
+      target: [classSlots.classType, classSlots.weekday],
+      set: { startTime: slot.startTime, capacity: slot.capacity },
+    });
+}
+
+export async function deleteClassSlot(id: number): Promise<void> {
+  const db = await getDb();
+  await db.delete(classSlots).where(eq(classSlots.id, id));
+}
+
+// ----------------------------------------------------------------------------
+// Reports (the Reports tab). Each function fetches plain rows and hands them to
+// the pure, separately-tested math in src/lib/reports.ts. Pass a shared `base`
+// (see loadReportBase) to run several reports off one load of the students.
+// ----------------------------------------------------------------------------
+
+export interface AttendanceSpan {
+  first: string;
+  last: string;
+  visits: number;
+}
+
+export interface ReportBase {
+  asOf: string;
+  students: StudentRow[];
+  spans: Map<number, AttendanceSpan>;
+}
+
+/** Every student plus, for each, their first/last attended class and total visits (never counting future-dated sessions). */
+export async function loadReportBase(): Promise<ReportBase> {
+  const asOf = today();
+  const db = await getDb();
+  const students = await listStudents();
+  const rows = await db
+    .select({
+      studentId: attendanceRecords.studentId,
+      first: sql<string>`min(${attendanceSessions.sessionDate})`.as("first_seen"),
+      last: sql<string>`max(${attendanceSessions.sessionDate})`.as("last_seen"),
+      visits: sql<number>`count(*)`.as("visit_count"),
+    })
+    .from(attendanceRecords)
+    .innerJoin(attendanceSessions, eq(attendanceRecords.sessionId, attendanceSessions.id))
+    .where(and(eq(attendanceRecords.status, "present"), lte(attendanceSessions.sessionDate, asOf)))
+    .groupBy(attendanceRecords.studentId);
+  return {
+    asOf,
+    students,
+    spans: new Map(rows.map((r) => [r.studentId, { first: r.first, last: r.last, visits: Number(r.visits) }])),
+  };
+}
+
+function lifecycleOf(b: ReportBase): LifecycleStudent[] {
+  return b.students.map((s) => {
+    const span = b.spans.get(s.id);
+    return {
+      id: s.id,
+      name: fullName(s),
+      joinDate: s.joinDate,
+      isActive: s.isActive,
+      leftDate: s.leftDate,
+      lastSeen: span?.last ?? null,
+      attended: span?.visits ?? 0,
+    };
+  });
+}
+
+function rankInfoOf(r: BeltRank): RankInfo {
+  return { id: r.id, name: r.name, track: r.track, sortOrder: r.sortOrder, classGroup: r.classGroup, degree: r.degree, colorHex: r.colorHex };
+}
+
+export type ReportWindow = "1y" | "3y" | "5y" | "all";
+
+/** Start date of a "last N years" window, or undefined for all time. */
+export function windowStartOf(asOf: string, w: ReportWindow): string | undefined {
+  if (w === "all") return undefined;
+  return addMonthsIso(asOf, -12 * Number(w[0]));
+}
+
+/** Class sessions in [from, to] with how many students were marked present at each. */
+async function loadSessionHeadcounts(from: string, to: string): Promise<{ date: string; classType: string; present: number }[]> {
+  const db = await getDb();
+  const sessions = await db
+    .select({ id: attendanceSessions.id, date: attendanceSessions.sessionDate, classType: attendanceSessions.classType })
+    .from(attendanceSessions)
+    .where(and(gte(attendanceSessions.sessionDate, from), lte(attendanceSessions.sessionDate, to)));
+  const counts = await db
+    .select({ sessionId: attendanceRecords.sessionId, n: sql<number>`count(*)`.as("present_count") })
+    .from(attendanceRecords)
+    .innerJoin(attendanceSessions, eq(attendanceRecords.sessionId, attendanceSessions.id))
+    .where(and(eq(attendanceRecords.status, "present"), gte(attendanceSessions.sessionDate, from), lte(attendanceSessions.sessionDate, to)))
+    .groupBy(attendanceRecords.sessionId);
+  const byId = new Map(counts.map((c) => [c.sessionId, Number(c.n)]));
+  return sessions.map((s) => ({ date: s.date, classType: s.classType, present: byId.get(s.id) ?? 0 }));
+}
+
+// 1. Attendance trend -------------------------------------------------------
+
+export interface AttendanceTrendReport {
+  asOf: string;
+  rows: TrendRow[];
+  summary: TrendSummary;
+  school: { weeks: WeekTotal[]; gaps: { from: string; to: string }[] };
+}
+
+export async function getAttendanceTrendReport(base?: ReportBase): Promise<AttendanceTrendReport> {
+  const b = base ?? (await loadReportBase());
+  const db = await getDb();
+  const windowStart = addDaysIso(b.asOf, -(TREND_WEEKS * 7 - 1));
+  const visitRows = await db
+    .select({ studentId: attendanceRecords.studentId, date: attendanceSessions.sessionDate })
+    .from(attendanceRecords)
+    .innerJoin(attendanceSessions, eq(attendanceRecords.sessionId, attendanceSessions.id))
+    .where(and(eq(attendanceRecords.status, "present"), gte(attendanceSessions.sessionDate, windowStart), lte(attendanceSessions.sessionDate, b.asOf)));
+  const visits = new Map<number, string[]>();
+  for (const v of visitRows) {
+    if (!visits.has(v.studentId)) visits.set(v.studentId, []);
+    visits.get(v.studentId)!.push(v.date);
+  }
+
+  const rows = computeTrends(
+    b.students.filter((s) => s.isActive).map((s) => ({
+      id: s.id,
+      name: fullName(s),
+      joinDate: s.joinDate,
+      lastSeen: b.spans.get(s.id)?.last ?? null,
+      visitDates: visits.get(s.id) ?? [],
+    })),
+    b.asOf,
+  );
+
+  const SCHOOL_WEEKS = 26;
+  const from = addDaysIso(b.asOf, -7 * SCHOOL_WEEKS);
+  const perDay = new Map<string, { sessions: number; present: number }>();
+  for (const s of await loadSessionHeadcounts(from, b.asOf)) {
+    if (s.present <= 0) continue; // a session nobody was marked at isn't a class that ran
+    const cur = perDay.get(s.date) ?? { sessions: 0, present: 0 };
+    cur.sessions += 1;
+    cur.present += s.present;
+    perDay.set(s.date, cur);
+  }
+  const school = schoolWeeks([...perDay.entries()].map(([date, v]) => ({ date, ...v })), b.asOf, SCHOOL_WEEKS);
+  return { asOf: b.asOf, rows, summary: summarizeTrends(rows), school };
+}
+
+// 2. Retention --------------------------------------------------------------
+
+export interface RetentionReport extends RetentionResult {
+  asOf: string;
+  window: ReportWindow;
+  countNeverAttended: boolean;
+}
+
+export async function getRetentionReport(
+  opts: { window: ReportWindow; countNeverAttended: boolean },
+  base?: ReportBase,
+): Promise<RetentionReport> {
+  const b = base ?? (await loadReportBase());
+  const result = computeRetention(lifecycleOf(b), b.asOf, {
+    joinedFrom: windowStartOf(b.asOf, opts.window),
+    countNeverAttended: opts.countNeverAttended,
+  });
+  return { ...result, asOf: b.asOf, ...opts };
+}
+
+// 3. Trial -> member conversion ---------------------------------------------
+
+export interface TrialReport extends TrialSummary {
+  /** Earliest trial on record -- trials before this weren't tracked. */
+  trackingSince: string | null;
+}
+
+export async function getTrialReport(base?: ReportBase): Promise<TrialReport> {
+  const b = base ?? (await loadReportBase());
+  const db = await getDb();
+  const history = await db.select({ studentId: trialHistory.studentId, startDate: trialHistory.startDate }).from(trialHistory);
+  const byId = new Map(b.students.map((s) => [s.id, s]));
+  const summary = summarizeTrials(
+    history.flatMap((h) => {
+      const s = byId.get(h.studentId);
+      return s ? [{ studentId: s.id, name: fullName(s), startDate: h.startDate, isActive: s.isActive, lastSeen: b.spans.get(s.id)?.last ?? null }] : [];
+    }),
+    b.asOf,
+  );
+  return { ...summary, trackingSince: history.map((h) => h.startDate).sort()[0] ?? null };
+}
+
+// 4. Belt pyramid -----------------------------------------------------------
+
+export type PyramidFilter = "all" | "tiger" | "jr" | "adult";
+
+export async function getBeltPyramidReport(filter: PyramidFilter = "all", base?: ReportBase): Promise<Pyramid> {
+  const b = base ?? (await loadReportBase());
+  const ranks = (await listBeltRanks()).map(rankInfoOf);
+  const inGroup = (s: StudentRow) =>
+    filter === "all" ||
+    (filter === "tiger" && s.track === "tiger") ||
+    (filter === "jr" && s.track === "regular" && s.ageGroup === "jr") ||
+    (filter === "adult" && s.track === "regular" && s.ageGroup === "adult");
+  return buildPyramid(ranks, b.students.filter((s) => s.isActive && inGroup(s)).map((s) => s.beltRankId));
+}
+
+// 6. Membership length + when students quit ----------------------------------
+
+export interface MembershipReport extends Membership {
+  window: ReportWindow;
+  /** How far up the ladder students got before leaving, lowest rank first. */
+  byRank: { rankId: number; name: string; group: PyramidGroup; colorHex: string; left: number; reached: number | null; rate: number | null }[];
+}
+
+export async function getMembershipReport(window: ReportWindow, base?: ReportBase): Promise<MembershipReport> {
+  const b = base ?? (await loadReportBase());
+  const ranks = (await listBeltRanks()).map(rankInfoOf);
+  const byStudent = new Map(b.students.map((s) => [s.id, s]));
+  const result = computeMembership(
+    lifecycleOf(b).map((s) => {
+      const rank = byStudent.get(s.id)!.rank;
+      return { ...s, rankId: rank.id, rankTrack: rank.track, rankOrder: rank.sortOrder };
+    }),
+    b.asOf,
+    { leftFrom: windowStartOf(b.asOf, window), ranks },
+  );
+  const departures = new Map(result.rankDepartures.map((d) => [d.rankId, d]));
+  // Passing the ranks people left from keeps any rank past 4th Degree visible when someone left there.
+  const byRank = buildPyramid(ranks, Object.keys(result.departedByRank).map(Number)).rows
+    .map((r) => ({ name: r.name, group: r.group, colorHex: r.colorHex, ...departures.get(r.rankId)! }))
+    .filter((r) => r.left > 0 || r.group !== "Black Belt");
+  return { ...result, window, byRank };
+}
+
+// 7. Time in rank, stuck students, testing pass rate --------------------------
+
+export interface PassRate {
+  /** Testing dates on/after this are counted: the first day the app itself recorded a class, since imported history only ever recorded passes. */
+  since: string | null;
+  promoted: number;
+  noChange: number;
+  rate: number | null;
+  byDate: { date: string; promoted: number; noChange: number }[];
+}
+
+async function loadPassRate(): Promise<PassRate> {
+  const db = await getDb();
+  const [first] = await db
+    .select({ d: sql<string | null>`min(${attendanceSessions.sessionDate})`.as("first_app_class") })
+    .from(attendanceSessions)
+    .where(ne(attendanceSessions.classType, "legacy"));
+  const since = first?.d ?? null;
+  if (since === null) return { since, promoted: 0, noChange: 0, rate: null, byDate: [] };
+
+  const promos = await db
+    .select({ studentId: rankHistory.studentId, date: rankHistory.promotionDate })
+    .from(rankHistory)
+    .where(gte(rankHistory.promotionDate, since));
+  const ncs = await db
+    .select({ studentId: noChangeHistory.studentId, date: noChangeHistory.testDate })
+    .from(noChangeHistory)
+    .where(gte(noChangeHistory.testDate, since));
+  // A Tiger Cub graduating is two rank_history rows for one test; count each student once per date.
+  const promoted = new Set(promos.map((p) => `${p.studentId}|${p.date}`));
+  const noChange = new Set(ncs.map((n) => `${n.studentId}|${n.date}`));
+  const byDate = new Map<string, { promoted: number; noChange: number }>();
+  const bump = (key: string, field: "promoted" | "noChange") => {
+    const date = key.split("|")[1];
+    const cur = byDate.get(date) ?? { promoted: 0, noChange: 0 };
+    cur[field] += 1;
+    byDate.set(date, cur);
+  };
+  for (const k of promoted) bump(k, "promoted");
+  for (const k of noChange) bump(k, "noChange");
+  return {
+    since,
+    promoted: promoted.size,
+    noChange: noChange.size,
+    rate: promoted.size + noChange.size ? promoted.size / (promoted.size + noChange.size) : null,
+    byDate: [...byDate.entries()].map(([date, v]) => ({ date, ...v })).sort((a, b) => b.date.localeCompare(a.date)),
+  };
+}
+
+export interface TimeInRankReport {
+  window: ReportWindow;
+  stuckFactor: number;
+  perRank: (RankTime & { name: string; group: PyramidGroup; colorHex: string })[];
+  stuck: (StuckStudent & { rankName: string })[];
+  passRate: PassRate;
+}
+
+export async function getTimeInRankReport(
+  window: ReportWindow,
+  base?: ReportBase,
+  opts: { stuckFactor?: number } = {},
+): Promise<TimeInRankReport> {
+  const b = base ?? (await loadReportBase());
+  const db = await getDb();
+  const promoRows = await db
+    .select({ id: rankHistory.id, studentId: rankHistory.studentId, toRankId: rankHistory.toRankId, date: rankHistory.promotionDate })
+    .from(rankHistory);
+  const ranks = (await listBeltRanks()).map(rankInfoOf);
+  const ladder = buildPyramid(ranks, []).rows;
+  const ladderOf = new Map(ladder.map((r, i) => [r.rankId, { index: i, ...r }]));
+  const rankById = new Map(ranks.map((r) => [r.id, r]));
+
+  const { perRank, stuck } = computeTimeInRank(
+    promoRows,
+    b.students.filter((s) => s.isActive).map((s) => ({
+      id: s.id,
+      name: fullName(s),
+      rankId: s.beltRankId,
+      isEntryRank: s.rank.sortOrder === 0,
+      joinDate: s.joinDate,
+      lastSeen: b.spans.get(s.id)?.last ?? null,
+    })),
+    b.asOf,
+    { since: windowStartOf(b.asOf, window), stuckFactor: opts.stuckFactor },
+  );
+
+  return {
+    window,
+    stuckFactor: opts.stuckFactor ?? 1.5,
+    perRank: perRank
+      .filter((r) => ladderOf.has(r.rankId))
+      .sort((a, c) => ladderOf.get(a.rankId)!.index - ladderOf.get(c.rankId)!.index)
+      .map((r) => ({ ...r, name: ladderOf.get(r.rankId)!.name, group: ladderOf.get(r.rankId)!.group, colorHex: ladderOf.get(r.rankId)!.colorHex })),
+    stuck: stuck.map((s) => ({ ...s, rankName: rankById.get(s.rankId)?.name ?? "" })),
+    passRate: await loadPassRate(),
+  };
+}
+
+// 8. Demographics -----------------------------------------------------------
+
+export interface DemographicsReport extends Demographics {
+  /** Active students with no gender recorded yet, for quick fill-in. */
+  missingGender: { id: number; name: string; age: number | null }[];
+}
+
+export async function getDemographicsReport(base?: ReportBase): Promise<DemographicsReport> {
+  const b = base ?? (await loadReportBase());
+  const active = b.students.filter((s) => s.isActive);
+  const result = computeDemographics(
+    active.map((s) => ({
+      id: s.id,
+      name: fullName(s),
+      dateOfBirth: s.dateOfBirth,
+      gender: s.gender,
+      phone: s.phone,
+      email: s.email,
+      guardian1Phone: s.guardian1Phone,
+      guardian1Email: s.guardian1Email,
+      guardian2Phone: s.guardian2Phone,
+      guardian2Email: s.guardian2Email,
+    })),
+    b.asOf,
+  );
+  return {
+    ...result,
+    missingGender: active.filter((s) => !s.gender).map((s) => ({ id: s.id, name: fullName(s), age: ageFromDob(s.dateOfBirth) })),
+  };
+}
+
+// 9. Enrollment flow --------------------------------------------------------
+
+export interface EnrollmentFlowReport {
+  months: number;
+  flow: FlowMonth[];
+  /** Former students with no attendance and no leave date: counted as never having enrolled. */
+  undatedDepartures: number;
+}
+
+export async function getEnrollmentFlowReport(months: number, base?: ReportBase): Promise<EnrollmentFlowReport> {
+  const b = base ?? (await loadReportBase());
+  const life = lifecycleOf(b);
+  return {
+    months,
+    flow: computeEnrollmentFlow(life, b.asOf, months),
+    undatedDepartures: life.filter((s) => !s.isActive && s.joinDate >= "1950-01-01" && s.attended === 0 && !s.leftDate).length,
+  };
+}
+
+// 5. Class slots ------------------------------------------------------------
+
+export interface ClassSlotReport {
+  from: string;
+  to: string;
+  rows: SlotRow[];
+}
+
+export async function getClassSlotReport(days: number): Promise<ClassSlotReport> {
+  const to = today();
+  const from = addDaysIso(to, -days);
+  const [sessions, configs] = await Promise.all([loadSessionHeadcounts(from, to), listClassSlots()]);
+  return { from, to, rows: computeSlots(sessions, configs, from, to) };
+}
+
+// Scorecard -----------------------------------------------------------------
+
+export interface Scorecard {
+  asOf: string;
+  attendance: TrendSummary;
+  retention: RetentionResult["marks"];
+  trials: Pick<TrialReport, "inTrial" | "deciding" | "converted" | "dropped" | "rate" | "trackingSince">;
+  pyramid: Pick<Pyramid, "rows" | "groups" | "total" | "bulges">;
+  membership: { activeAvgMonths: number | null; departedMedianMonths: number | null; peak: string | null };
+  timeInRank: { stuck: number; passRate: number | null; testings: number };
+  demographics: { kids: number; adults: number; kidsPerAdult: number | null; missingGender: number; total: number };
+  enrollment: { signups: number; lost: number; net: number };
+  slots: { fullest: SlotRow | null; lightest: SlotRow | null; anyCapacity: boolean };
+}
+
+/** The numbers for the Reports scorecard, computed off a single load of the students. */
+export async function getReportsScorecard(): Promise<Scorecard> {
+  const base = await loadReportBase();
+  const [trend, retention, trials, pyramid, membership, tir, demo, flow, slots] = await Promise.all([
+    getAttendanceTrendReport(base),
+    getRetentionReport({ window: "3y", countNeverAttended: false }, base),
+    getTrialReport(base),
+    getBeltPyramidReport("all", base),
+    getMembershipReport("5y", base),
+    getTimeInRankReport("5y", base),
+    getDemographicsReport(base),
+    getEnrollmentFlowReport(12, base),
+    getClassSlotReport(90),
+  ]);
+  const graded = slots.rows.filter((r) => r.utilization !== null && r.sessions > 0);
+  return {
+    asOf: base.asOf,
+    attendance: trend.summary,
+    retention: retention.marks,
+    trials,
+    pyramid,
+    membership: { activeAvgMonths: membership.active.avgMonths, departedMedianMonths: membership.departed.medianMonths, peak: membership.peak },
+    timeInRank: { stuck: tir.stuck.length, passRate: tir.passRate.rate, testings: tir.passRate.byDate.length },
+    demographics: { kids: demo.kids, adults: demo.adults, kidsPerAdult: demo.kidsPerAdult, missingGender: demo.missingGender.length, total: demo.total },
+    enrollment: {
+      signups: flow.flow.reduce((s, m) => s + m.signups, 0),
+      lost: flow.flow.reduce((s, m) => s + m.lost, 0),
+      net: flow.flow.reduce((s, m) => s + m.net, 0),
+    },
+    slots: {
+      fullest: graded.length ? graded.reduce((a, r) => (r.utilization! > a.utilization! ? r : a)) : null,
+      lightest: graded.length ? graded.reduce((a, r) => (r.utilization! < a.utilization! ? r : a)) : null,
+      anyCapacity: slots.rows.some((r) => r.capacity !== null),
+    },
+  };
 }

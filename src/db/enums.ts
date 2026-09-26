@@ -25,7 +25,10 @@ export const EVENT_TYPES = [
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
-export const ATTENDANCE_STATUSES = ["present", "absent", "unmarked"] as const;
+export const GENDERS = ["Male", "Female", "Other"] as const;
+export type Gender = (typeof GENDERS)[number];
+
+export const ATTENDANCE_STATUSES =["present", "absent", "unmarked"] as const;
 export type AttendanceStatus = (typeof ATTENDANCE_STATUSES)[number];
 
 export const BELT_SIZES = [

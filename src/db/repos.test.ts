@@ -5,6 +5,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { __setTestDb, createDb } from "./client";
+import { today } from "@/lib/format";
+import { addDaysIso } from "@/lib/dates";
 import {
   addInventoryItem,
   addInventoryItems,
@@ -15,6 +17,8 @@ import {
   buildEventRosterCsv,
   buildNonTestersCsv,
   buildTestingCycleCsv,
+  classesSinceLastTesting,
+  classesSincePromotion,
   createEvent,
   createStudent,
   getBeltOrderBreakdown,
@@ -27,8 +31,14 @@ import {
   getDashboardStats,
   getUpcomingAgenda,
   deleteInventoryItem,
+  getAttendanceStats,
+  getEventStats,
+  MIN_TESTING_SIZE,
   getOrCreateSession,
+  getPreviousCycle,
+  getRosterStats,
   getStudentAttendance,
+  getStudentAttendanceDetail,
   addSpecialTester,
   deleteStudentPermanently,
   getStudentDeleteImpact,
@@ -60,7 +70,24 @@ import {
   unpostEvent,
   unregisterFromTest,
   updateCycle,
+  updateNextCycleDates,
+  updateStudent,
+  setStudentGender,
+  getAttendanceTrendReport,
+  getBeltPyramidReport,
+  getClassSlotReport,
+  getDemographicsReport,
+  getEnrollmentFlowReport,
+  getReportsScorecard,
+  getRetentionReport,
+  getTimeInRankReport,
+  getTrialReport,
+  getMembershipReport,
+  listClassSlots,
+  saveClassSlot,
+  deleteClassSlot,
   updateProgress,
+  type StatsFilter,
   type StudentInput,
 } from "./repos";
 
@@ -89,6 +116,8 @@ beforeAll(() => {
   sqlite.exec(readFileSync(join(migrationsDir, "0011_black_belt_inventory.sql"), "utf8"));
   sqlite.exec(readFileSync(join(migrationsDir, "0012_no_change_history.sql"), "utf8"));
   sqlite.exec(readFileSync(join(migrationsDir, "0013_target_rank.sql"), "utf8"));
+  sqlite.exec(readFileSync(join(migrationsDir, "0014_next_cycle_and_history.sql"), "utf8"));
+  sqlite.exec(readFileSync(join(migrationsDir, "0015_reports_foundation.sql"), "utf8"));
 
   const blackId = (sqlite
     .prepare("SELECT id FROM belt_ranks WHERE track='regular' AND degree IS NOT NULL ORDER BY sort_order LIMIT 1")
@@ -523,6 +552,35 @@ describe("promote all — scope of progress reset and cycle date window", () => 
     expect(stillCurrent.endDate).toBe("2025-06-30");
   });
 
+  it("uses pre-set next-cycle dates when rolling forward, instead of the 90-day placeholder guess", async () => {
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-01-01", "2025-06-30", "2025-06-15");
+    await updateNextCycleDates(cycle.id, "2025-07-01", "2025-12-01", "2025-11-15");
+
+    await promoteCycle(cycle.id);
+
+    const rolled = await getCurrentCycle();
+    expect(rolled.startDate).toBe("2025-07-01");
+    expect(rolled.endDate).toBe("2025-12-01");
+    expect(rolled.testingDate).toBe("2025-11-15");
+    // Applied once, then cleared so they don't leak into the round after.
+    expect(rolled.nextStartDate).toBeNull();
+    expect(rolled.nextEndDate).toBeNull();
+    expect(rolled.nextTestingDate).toBeNull();
+  });
+
+  it("logs the just-finished cycle's window to history when rolling forward, for the 'previous cycle' record", async () => {
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-02-01", "2025-07-01", "2025-06-20");
+
+    await promoteCycle(cycle.id);
+
+    const prev = await getPreviousCycle();
+    expect(prev?.startDate).toBe("2025-02-01");
+    expect(prev?.endDate).toBe("2025-07-01");
+    expect(prev?.testingDate).toBe("2025-06-20");
+  });
+
   it("classes attended in the gap between testing day and clicking Promote All count toward the NEXT cycle, not the one that just tested", async () => {
     const rank = await lowestRegularColorRank();
     const cycle = await getCurrentCycle();
@@ -594,6 +652,33 @@ describe("no change (tested but not promoted)", () => {
     expect(history[0].h.note).toBe("Broke form on the third board.");
     expect(history[0].h.testDate).toBe("2025-06-15"); // the cycle's testing date
     expect(history[0].at.id).toBe(rank.id); // recorded against the belt they were testing at
+
+    await setStudentActive(id, false);
+  });
+
+  it("resets 'classes since last testing' on a No Change, unlike 'since last promotion' which doesn't", async () => {
+    const rank = await lowestRegularColorRank();
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-01-01", "2025-06-30", "2025-06-15");
+
+    const id = await createStudent(makeInput({ firstName: "Retry", lastName: "Ing", beltRankId: rank.id }));
+    const beforeTest = await getOrCreateSession("2025-05-01", "adult");
+    await setAttendance(beforeTest, id, "present");
+
+    await registerToTest(cycle.id, id);
+    await markNoChange(cycle.id, id, "F", null); // tested on 2025-06-15, not promoted
+
+    const afterTest = await getOrCreateSession("2025-06-20", "adult");
+    await setAttendance(afterTest, id, "present");
+
+    // No rank_history row exists yet, so sinceLastPromotion has no cutoff at
+    // all and counts both classes — it doesn't know a testing happened.
+    expect(await classesSincePromotion(id)).toBe(2);
+
+    // sinceLastTesting correctly resets at the No Change's test date.
+    const sinceTesting = await classesSinceLastTesting(id);
+    expect(sinceTesting.since).toBe("2025-06-15");
+    expect(sinceTesting.count).toBe(1); // only the 6/20 class, after the No Change test date
 
     await setStudentActive(id, false);
   });
@@ -819,12 +904,60 @@ describe("student attendance history", () => {
     expect(a.thisCycle).toBe(1); // only the 6/15 class
     expect(a.total).toBe(3); // all three, regardless of cycle window
   });
+
+  it("returns current/previous cycle windows, events, and weekly averages for the expanded view", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "Full", lastName: "History", beltRankId: rank.id, joinDate: "2025-01-01" }));
+
+    const cycle = await getCurrentCycle();
+    await updateCycle(cycle.id, "2025-01-01", "2025-06-30", "2025-06-15");
+    const prevSession1 = await getOrCreateSession("2025-02-01", "adult");
+    await setAttendance(prevSession1, id, "present");
+    const prevSession2 = await getOrCreateSession("2025-03-01", "adult");
+    await setAttendance(prevSession2, id, "present");
+
+    await promoteCycle(cycle.id); // rolls forward; logs 2025-01-01..2025-06-30 (testing 6/15) to history
+    const rolled = await getCurrentCycle();
+
+    const curSession = await getOrCreateSession("2025-06-20", "adult");
+    await setAttendance(curSession, id, "present");
+
+    const eventId = await createEvent({
+      name: "Summer Open", eventDate: "2025-06-25", eventTime: null,
+      eventType: "Tournament", location: null, notes: null, classCredit: 1,
+    });
+    await addToRoster(eventId, id);
+    await postEvent(eventId);
+
+    const detail = await getStudentAttendanceDetail(id);
+
+    expect(detail.previousCycle?.start).toBe("2025-01-01");
+    expect(detail.previousCycle?.count).toBe(2); // the Feb + Mar classes
+
+    expect(detail.currentCycle.start).toBe(rolled.startDate);
+    expect(detail.currentCycle.count).toBe(2); // the 6/20 class + the posted tournament
+
+    expect(detail.events.map((e) => e.label)).toContain("Summer Open");
+    expect(detail.totalClasses).toBe(4); // 2 prior classes + 1 class + 1 event credit
+    expect(detail.avgPerWeekCurrentCycle).toBeGreaterThan(0);
+    expect(detail.avgPerWeekAllTime).toBeGreaterThan(0);
+
+    await setStudentActive(id, false);
+  });
 });
 
 function isoDaysAgo(n: number): string {
   const d = new Date();
   d.setDate(d.getDate() - n);
   return d.toISOString().slice(0, 10);
+}
+
+// Exactly N calendar years back (same month/day), so ageFromDob's whole-year
+// calendar comparison returns exactly N -- unlike isoDaysAgo(n * 365), which
+// drifts across leap years and can be off by one.
+function exactlyYearsAgo(n: number): string {
+  const d = new Date();
+  return `${d.getFullYear() - n}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 describe("trials + dashboard alerts", () => {
@@ -1202,6 +1335,493 @@ describe("permanent student delete", () => {
     // No leftover rows to violate uniqueness if a same-named student is added later.
     const id2 = await createStudent(makeInput({ firstName: "Dupe", lastName: "Student", beltRankId: rank.id }));
     expect((await getStudentDeleteImpact(id2)).attendanceRecords).toBe(0);
+  });
+});
+
+describe("reports data capture (left date, gender, trial history, class slots)", () => {
+  const trialRows = (id: number) =>
+    sqlite.prepare("SELECT start_date, ended_date FROM trial_history WHERE student_id = ? ORDER BY id").all(id) as
+      { start_date: string; ended_date: string | null }[];
+  const leftDateOf = async (id: number) => (await listStudents()).find((s) => s.id === id)!.leftDate;
+
+  it("stamps left_date on deactivate, keeps an existing one, and clears it on reactivate", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "Left", lastName: "Date", beltRankId: rank.id }));
+    expect(await leftDateOf(id)).toBeNull();
+
+    await setStudentActive(id, false);
+    expect(await leftDateOf(id)).toBe(today());
+
+    sqlite.prepare("UPDATE students SET left_date = '2020-01-01' WHERE id = ?").run(id);
+    await setStudentActive(id, false); // deactivating again must not move the date
+    expect(await leftDateOf(id)).toBe("2020-01-01");
+
+    await setStudentActive(id, true);
+    expect(await leftDateOf(id)).toBeNull();
+  });
+
+  it("saves gender, leaves it alone when a form doesn't send it, and rejects unknown values", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "Gen", lastName: "Der", beltRankId: rank.id, gender: "Female" }));
+    const genderOf = async () => (await listStudents()).find((s) => s.id === id)!.gender;
+    expect(await genderOf()).toBe("Female");
+
+    await updateStudent(id, makeInput({ firstName: "Gen", lastName: "Der2", beltRankId: rank.id })); // no gender key
+    expect(await genderOf()).toBe("Female");
+
+    await setStudentGender(id, "Other");
+    expect(await genderOf()).toBe("Other");
+    await setStudentGender(id, null);
+    expect(await genderOf()).toBeNull();
+    await expect(setStudentGender(id, "Robot")).rejects.toThrow();
+
+    await setStudentActive(id, false);
+  });
+
+  it("keeps a trial_history row when a trial ends, and follows start/restart/date corrections", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "Trial", lastName: "History", beltRankId: rank.id, trialStartDate: "2026-01-01" }));
+    expect(trialRows(id)).toEqual([{ start_date: "2026-01-01", ended_date: null }]);
+
+    await setTrial(id, null); // "End trial" wipes students.trial_start_date...
+    expect(trialRows(id)).toEqual([{ start_date: "2026-01-01", ended_date: today() }]); // ...but the record survives
+
+    await setTrial(id, "2026-02-01"); // a second trial is a second row
+    expect(trialRows(id)).toHaveLength(2);
+    expect(trialRows(id)[1]).toEqual({ start_date: "2026-02-01", ended_date: null });
+
+    await updateStudent(id, makeInput({ firstName: "Trial", lastName: "History", beltRankId: rank.id, trialStartDate: "2026-02-05" }));
+    expect(trialRows(id)[1].start_date).toBe("2026-02-05"); // corrected in place, not duplicated
+    expect(trialRows(id)).toHaveLength(2);
+
+    await setStudentActive(id, false);
+  });
+
+  it("removes trial_history when a student is permanently deleted", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "Trial", lastName: "Gone", beltRankId: rank.id, trialStartDate: "2026-03-01" }));
+    expect(trialRows(id)).toHaveLength(1);
+    await deleteStudentPermanently(id);
+    expect(trialRows(id)).toHaveLength(0);
+  });
+
+  it("adds, updates (one row per class + weekday), and deletes class slots", async () => {
+    await saveClassSlot({ classType: "adult", weekday: 2, startTime: "18:30", capacity: 20 });
+    await saveClassSlot({ classType: "adult", weekday: 2, startTime: "19:00", capacity: 25 }); // same slot -> update
+    const mine = (await listClassSlots()).filter((s) => s.classType === "adult" && s.weekday === 2);
+    expect(mine).toHaveLength(1);
+    expect(mine[0].startTime).toBe("19:00");
+    expect(mine[0].capacity).toBe(25);
+
+    await deleteClassSlot(mine[0].id);
+    expect((await listClassSlots()).some((s) => s.classType === "adult" && s.weekday === 2)).toBe(false);
+  });
+});
+
+// The report math itself is tested with hand-built data in src/lib/reports.test.ts.
+// These check the queries feeding it, looking only at rows each test creates
+// (the fixture DB is shared and accumulates across the file).
+describe("reports queries", () => {
+  const ago = (n: number) => addDaysIso(today(), -n);
+  const attend = async (id: number, date: string, classType: "adult" | "tiger" | "jr-brb" = "adult") =>
+    setAttendance(await getOrCreateSession(date, classType), id, "present");
+
+  it("attendance trend: flags lapsed students, uses last class attended, and ignores future-dated sessions", async () => {
+    const rank = await lowestRegularColorRank();
+    const steady = await createStudent(makeInput({ firstName: "Trend", lastName: "Steady", beltRankId: rank.id }));
+    const lapsed = await createStudent(makeInput({ firstName: "Trend", lastName: "Lapsed", beltRankId: rank.id }));
+    await attend(steady, ago(9));
+    await attend(steady, ago(2));
+    await attend(steady, ago(-30)); // a session dated in the future must not count as "last seen"
+    await attend(lapsed, ago(30));
+
+    const report = await getAttendanceTrendReport();
+    expect(report.asOf).toBe(today());
+    const s = report.rows.find((r) => r.id === steady)!;
+    const l = report.rows.find((r) => r.id === lapsed)!;
+    expect(s).toMatchObject({ status: "ok", lastSeen: ago(2), daysSince: 2 });
+    expect(l).toMatchObject({ status: "lapsed", lastSeen: ago(30), daysSince: 30 });
+    expect(s.weeks).toHaveLength(12);
+    expect(s.weeks.reduce((a, b) => a + b, 0)).toBe(2);
+    expect(report.summary.lapsed).toBeGreaterThanOrEqual(1);
+    expect(report.school.weeks).toHaveLength(26);
+
+    await setStudentActive(steady, false);
+    await setStudentActive(lapsed, false);
+  });
+
+  it("retention: dates a departure by the last class attended, so someone who stopped at ~3 months counts at 3 but not 6", async () => {
+    const rank = await lowestRegularColorRank();
+    const opts = { window: "all" as const, countNeverAttended: false };
+    const before = await getRetentionReport(opts);
+
+    const id = await createStudent(makeInput({ firstName: "Ret", lastName: "Ention", beltRankId: rank.id, joinDate: ago(800) }));
+    await attend(id, ago(700)); // ~3.3 months after joining
+    await setStudentActive(id, false); // deactivated today, but they stopped coming long before
+
+    const after = await getRetentionReport(opts);
+    const delta = (m: number, k: "eligible" | "retained") =>
+      after.marks.find((x) => x.months === m)![k] - before.marks.find((x) => x.months === m)![k];
+    expect([delta(3, "eligible"), delta(3, "retained")]).toEqual([1, 1]);
+    expect([delta(6, "eligible"), delta(6, "retained")]).toEqual([1, 0]);
+  });
+
+  it("trial report: classifies trials from the kept history even after 'End trial' clears the student's date", async () => {
+    const rank = await lowestRegularColorRank();
+    const stayed = await createStudent(makeInput({ firstName: "Trial", lastName: "Stayed", beltRankId: rank.id, trialStartDate: ago(100) }));
+    const quit = await createStudent(makeInput({ firstName: "Trial", lastName: "Quit", beltRankId: rank.id, trialStartDate: ago(100) }));
+    const current = await createStudent(makeInput({ firstName: "Trial", lastName: "Current", beltRankId: rank.id, trialStartDate: ago(5) }));
+    await attend(stayed, ago(10)); // attended after the 6-week trial ended
+    await attend(quit, ago(80));
+    await attend(current, ago(2));
+    await setTrial(stayed, null); // staff click "End trial"
+    await setStudentActive(quit, false);
+
+    const report = await getTrialReport();
+    const outcome = (id: number) => report.rows.find((r) => r.studentId === id)?.outcome;
+    expect(outcome(stayed)).toBe("converted");
+    expect(outcome(quit)).toBe("dropped");
+    expect(outcome(current)).toBe("inTrial");
+    expect(report.trackingSince).not.toBeNull();
+
+    await setStudentActive(stayed, false);
+    await setStudentActive(current, false);
+  });
+
+  it("belt pyramid: counts active students by rank, and can be limited to a program", async () => {
+    const ranks = await listBeltRanks();
+    const tigerWhite = ranks.find((r) => r.name === "Tiger Cub White Belt")!;
+    const white = ranks.find((r) => r.track === "regular" && r.sortOrder === 0)!;
+    const countAt = (p: Awaited<ReturnType<typeof getBeltPyramidReport>>, id: number) => p.rows.find((r) => r.rankId === id)?.count ?? 0;
+    const before = await getBeltPyramidReport("all");
+    const beforeAdult = await getBeltPyramidReport("adult");
+
+    const cub = await createStudent(makeInput({ firstName: "Pyr", lastName: "Cub", track: "tiger", beltRankId: tigerWhite.id }));
+    const adult = await createStudent(makeInput({ firstName: "Pyr", lastName: "Adult", ageGroup: "adult", beltRankId: white.id }));
+
+    const after = await getBeltPyramidReport("all");
+    expect(countAt(after, tigerWhite.id)).toBe(countAt(before, tigerWhite.id) + 1);
+    expect(countAt(after, white.id)).toBe(countAt(before, white.id) + 1);
+    expect(after.total).toBe(before.total + 2);
+    expect(after.rows[0].name).toBe("Tiger Cub White Belt"); // ladder starts with Tiger Cubs
+    expect(countAt(await getBeltPyramidReport("tiger"), white.id)).toBe(0);
+    expect(countAt(await getBeltPyramidReport("adult"), white.id)).toBe(countAt(beforeAdult, white.id) + 1);
+
+    await setStudentActive(cub, false);
+    await setStudentActive(adult, false);
+  });
+
+  it("time in rank: counts a student who tested (even with two rank rows the same day) once toward the pass rate", async () => {
+    const rank = await lowestRegularColorRank();
+    const before = (await getTimeInRankReport("all")).passRate;
+    const id = await createStudent(makeInput({ firstName: "Pass", lastName: "Rate", beltRankId: rank.id }));
+    await promoteStudent(id, { date: today() });
+    await promoteStudent(id, { date: today() }); // e.g. a rank skip recorded as two steps
+
+    const report = await getTimeInRankReport("all");
+    expect(before.since).not.toBeNull();
+    expect(report.passRate.promoted).toBe(before.promoted + 1);
+    expect(report.passRate.rate).toBeGreaterThan(0);
+    expect(report.perRank.every((r) => r.n >= 1 && r.medianDays > 0)).toBe(true);
+
+    await setStudentActive(id, false);
+  });
+
+  it("demographics: lists active students missing a gender until it's recorded", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "Demo", lastName: "Graphic", beltRankId: rank.id }));
+    expect((await getDemographicsReport()).missingGender.some((m) => m.id === id)).toBe(true);
+    await setStudentGender(id, "Male");
+    const after = await getDemographicsReport();
+    expect(after.missingGender.some((m) => m.id === id)).toBe(false);
+    expect(after.bands.reduce((s, b) => s + b.count, 0) + after.unknownAge).toBe(after.total);
+    await setStudentActive(id, false);
+  });
+
+  it("enrollment flow: a student joining today is a sign-up this month; one deactivated after their last class is a loss in that class's month", async () => {
+    const rank = await lowestRegularColorRank();
+    const thisMonth = today().slice(0, 7);
+    const before = (await getEnrollmentFlowReport(12)).flow.find((m) => m.key === thisMonth)!;
+
+    const id = await createStudent(makeInput({ firstName: "Flow", lastName: "Joiner", beltRankId: rank.id, joinDate: today() }));
+    const mid = await getEnrollmentFlowReport(12);
+    expect(mid.flow).toHaveLength(12);
+    expect(mid.flow[11].key).toBe(thisMonth);
+    expect(mid.flow.find((m) => m.key === thisMonth)!.signups).toBe(before.signups + 1);
+
+    await attend(id, today());
+    await setStudentActive(id, false); // left this month
+    const after = (await getEnrollmentFlowReport(12)).flow.find((m) => m.key === thisMonth)!;
+    expect(after.lost).toBe(before.lost + 1);
+  });
+
+  it("class slots: averages headcount for a class + weekday and picks up the configured capacity", async () => {
+    const rank = await lowestRegularColorRank();
+    const weekday = new Date(`${ago(3)}T00:00:00Z`).getUTCDay();
+    const rowFor = async () => (await getClassSlotReport(30)).rows.find((r) => r.classType === "jr-brb" && r.weekday === weekday);
+    const before = await rowFor();
+
+    const ids = await Promise.all([1, 2, 3].map((n) => createStudent(makeInput({ firstName: "Slot", lastName: `Kid${n}`, beltRankId: rank.id }))));
+    for (const id of ids) await attend(id, ago(3), "jr-brb");
+    await saveClassSlot({ classType: "jr-brb", weekday, startTime: "17:00", capacity: 6 });
+
+    const after = (await rowFor())!;
+    expect(after.sessions).toBe((before?.sessions ?? 0) + 1);
+    expect(after).toMatchObject({ capacity: 6, startTime: "17:00" });
+    expect(after.peak).toBeGreaterThanOrEqual(3);
+    expect(after.utilization).toBeGreaterThan(0);
+
+    for (const id of ids) await setStudentActive(id, false);
+  });
+
+  it("membership + scorecard: run end to end and report internally consistent numbers", async () => {
+    const membership = await getMembershipReport("all");
+    expect(membership.buckets.reduce((s, b) => s + b.count, 0)).toBe(membership.departed.n);
+    expect(membership.byRank.reduce((s, r) => s + r.left, 0)).toBe(membership.departed.n);
+
+    const card = await getReportsScorecard();
+    expect(card.asOf).toBe(today());
+    expect(card.retention.map((m) => m.months)).toEqual([3, 6, 12]);
+    expect(card.pyramid.total).toBe(card.pyramid.rows.reduce((s, r) => s + r.count, 0));
+    expect(card.attendance.total).toBe(card.pyramid.total); // every active student is in both
+    expect(card.demographics.kids + card.demographics.adults).toBeLessThanOrEqual(card.demographics.total);
+  });
+});
+
+// The fixture DB accumulates students/sessions/promotions across the whole
+// file, so these assert on deltas (before vs. after a controlled change)
+// rather than absolute totals, which would be contaminated by earlier tests.
+// Wide enough to include everything the fixture ever dates (default join
+// dates, the "far future" dates other describe blocks use to avoid
+// collisions, etc.) while staying well under MAX_PERIOD_BUCKETS.
+const ALL_TIME: StatsFilter = { start: "2000-01-01", end: "2040-12-31", classTypes: [], track: "all", ageGroup: "all" };
+
+describe("statistics", () => {
+  it("tracks roster demographics (age, tenure, belt distribution, enrollment) as deltas", async () => {
+    const before = await getRosterStats(ALL_TIME);
+    const tigerBefore = before.ageByGroup.find((g) => g.group === "Tiger Cubs")!;
+    const tigerTrackBefore = before.byTrack.find((t) => t.track === "tiger")!;
+    const thisMonthKey = today().slice(0, 7);
+    const monthBefore = before.enrollmentByMonth.find((m) => m.key === thisMonthKey)!;
+
+    const ranks = await listBeltRanks();
+    const tigerWhite = ranks.find((r) => r.name === "Tiger Cub White Belt")!;
+    const id = await createStudent(makeInput({
+      firstName: "Stat", lastName: "Sample", track: "tiger", beltRankId: tigerWhite.id,
+      dateOfBirth: exactlyYearsAgo(5), joinDate: today(),
+    }));
+
+    const after = await getRosterStats(ALL_TIME);
+    expect(after.activeTotal).toBe(before.activeTotal + 1);
+    expect(after.totalEverEnrolled).toBe(before.totalEverEnrolled + 1);
+    expect(after.byTrack.find((t) => t.track === "tiger")!.count).toBe(tigerTrackBefore.count + 1);
+
+    const tigerAfter = after.ageByGroup.find((g) => g.group === "Tiger Cubs")!;
+    expect(tigerAfter.count).toBe(tigerBefore.count + 1);
+    const expectedAvgAge = ((tigerBefore.avg ?? 0) * tigerBefore.count + 5) / tigerAfter.count;
+    expect(tigerAfter.avg).toBeCloseTo(expectedAvgAge, 2);
+
+    const whiteRowBefore = before.beltDistribution.find((d) => d.track === "tiger")!.rows.find((r) => r.rankId === tigerWhite.id)!;
+    const whiteRowAfter = after.beltDistribution.find((d) => d.track === "tiger")!.rows.find((r) => r.rankId === tigerWhite.id)!;
+    expect(whiteRowAfter.count).toBe(whiteRowBefore.count + 1);
+
+    const monthAfter = after.enrollmentByMonth.find((m) => m.key === thisMonthKey)!;
+    expect(monthAfter.count).toBe(monthBefore.count + 1);
+
+    await setStudentActive(id, false);
+  });
+
+  it("counts a former-trial student toward trial retention, whether they stayed active or not", async () => {
+    const rank = await lowestRegularColorRank();
+    const before = await getRosterStats(ALL_TIME);
+
+    const stayed = await createStudent(makeInput({ firstName: "Stayed", lastName: "Trial", beltRankId: rank.id, trialStartDate: "2025-01-01" }));
+    const left = await createStudent(makeInput({ firstName: "Left", lastName: "Trial", beltRankId: rank.id, trialStartDate: "2025-01-01" }));
+    await setStudentActive(left, false);
+
+    const after = await getRosterStats(ALL_TIME);
+    expect(after.trialRetention.everTrial).toBe(before.trialRetention.everTrial + 2);
+    expect(after.trialRetention.stillActive).toBe(before.trialRetention.stillActive + 1);
+
+    await setStudentActive(stayed, false);
+  });
+
+  it("breaks down attendance by month, week, class type, day of week, and their combination", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "Stat", lastName: "Attender", beltRankId: rank.id }));
+
+    // A Tuesday, fixed far enough in the past that no other test's relative
+    // (isoDaysAgo-based) date could ever land on it and pre-create this session.
+    const day = "2023-01-03";
+    const before = await getAttendanceStats(ALL_TIME);
+
+    const session = await getOrCreateSession(day, "adult");
+    await setAttendance(session, id, "present");
+    const id2 = await createStudent(makeInput({ firstName: "Stat", lastName: "Attender2", beltRankId: rank.id }));
+    await setAttendance(session, id2, "absent"); // must not count toward "present"
+
+    const after = await getAttendanceStats(ALL_TIME);
+    const monthKey = day.slice(0, 7);
+    const beforeMonth = before.byMonth.find((m) => m.key === monthKey)!;
+    const afterMonth = after.byMonth.find((m) => m.key === monthKey)!;
+    expect(afterMonth.sessions).toBe(beforeMonth.sessions + 1);
+    expect(afterMonth.present).toBe(beforeMonth.present + 1);
+
+    const beforeAdult = before.byClassType.find((c) => c.key === "adult")!;
+    const afterAdult = after.byClassType.find((c) => c.key === "adult")!;
+    expect(afterAdult.sessions).toBe(beforeAdult.sessions + 1);
+    expect(afterAdult.present).toBe(beforeAdult.present + 1);
+
+    const beforeTue = before.byDayOfWeek.find((d) => d.label === "Tue")!;
+    const afterTue = after.byDayOfWeek.find((d) => d.label === "Tue")!;
+    expect(afterTue.sessions).toBe(beforeTue.sessions + 1);
+    expect(afterTue.present).toBe(beforeTue.present + 1);
+
+    const beforeCombo = before.classByDay.find((c) => c.classType === "adult" && c.day === "Tue")!;
+    const afterCombo = after.classByDay.find((c) => c.classType === "adult" && c.day === "Tue")!;
+    expect(afterCombo.sessions).toBe(beforeCombo.sessions + 1);
+    expect(afterCombo.present).toBe(beforeCombo.present + 1);
+
+    await setStudentActive(id, false);
+    await setStudentActive(id2, false);
+  });
+
+  it("counts only real testing days toward testing size, and reports smaller promotion dates separately", async () => {
+    const rank = await lowestRegularColorRank();
+    const before = await getEventStats(ALL_TIME);
+
+    // A full testing: MIN_TESTING_SIZE students promoted on one brand-new date.
+    const crowd = await Promise.all(
+      Array.from({ length: MIN_TESTING_SIZE }, (_, i) => createStudent(makeInput({ firstName: "Crowd", lastName: `T${i}`, beltRankId: rank.id }))),
+    );
+    for (const id of crowd) await promoteStudent(id, { date: "2031-03-03" });
+    // A make-up: two students on their own date. Not a testing.
+    const a = await createStudent(makeInput({ firstName: "Make", lastName: "Up1", beltRankId: rank.id }));
+    const b = await createStudent(makeInput({ firstName: "Make", lastName: "Up2", beltRankId: rank.id }));
+    await promoteStudent(a, { date: "2031-03-10" });
+    await promoteStudent(b, { date: "2031-03-10" });
+    // One student with two rank rows on the same date (e.g. a Tiger Cub graduating) counts once.
+    const graduate = await createStudent(makeInput({ firstName: "Two", lastName: "Rows", beltRankId: rank.id }));
+    await promoteStudent(graduate, { date: "2031-03-17" });
+    await promoteStudent(graduate, { date: "2031-03-17" });
+
+    const after = await getEventStats(ALL_TIME);
+    expect(after.testingSize.count).toBe(before.testingSize.count + 1); // only the full testing
+    expect(after.testingSize.sizes).toContain(MIN_TESTING_SIZE);
+    expect(after.testingSize.sizes.every((n) => n >= MIN_TESTING_SIZE)).toBe(true);
+    expect(after.smallerPromotionDates.dates).toBe(before.smallerPromotionDates.dates + 2); // the make-up and the graduate
+    expect(after.smallerPromotionDates.students).toBe(before.smallerPromotionDates.students + 3);
+    // The promotion rate counts each student once per date, so the graduate adds 1, not 2.
+    expect(after.promotionRate.promoted).toBe(before.promotionRate.promoted + MIN_TESTING_SIZE + 2 + 1);
+
+    for (const id of [...crowd, a, b, graduate]) await setStudentActive(id, false);
+  });
+
+  it("computes tournament size from posted events' roster counts", async () => {
+    const rank = await lowestRegularColorRank();
+    const before = await getEventStats(ALL_TIME);
+
+    const eventId = await createEvent({
+      name: "Stats Test Tournament", eventDate: "2031-04-04", eventTime: null,
+      eventType: "Tournament", location: null, notes: null, classCredit: 1,
+    });
+    const competitors = await Promise.all([1, 2, 3].map((n) =>
+      createStudent(makeInput({ firstName: "Comp", lastName: `Etitor${n}`, beltRankId: rank.id }))));
+    for (const c of competitors) await addToRoster(eventId, c);
+    await postEvent(eventId);
+
+    const after = await getEventStats(ALL_TIME);
+    const beforeStat = before.eventSizeByType.find((e) => e.eventType === "Tournament")?.stat ?? { count: 0, sizes: [] };
+    const afterStat = after.eventSizeByType.find((e) => e.eventType === "Tournament")!.stat;
+    expect(afterStat.count).toBe(beforeStat.count + 1);
+    expect(afterStat.sizes).toContain(3);
+
+    for (const c of competitors) await setStudentActive(c, false);
+  });
+
+  it("scopes roster stats to a track filter, while byTrack stays a whole-school reference", async () => {
+    const ranks = await listBeltRanks();
+    const tigerWhite = ranks.find((r) => r.name === "Tiger Cub White Belt")!;
+    const regularRank = await lowestRegularColorRank();
+    const tigerId = await createStudent(makeInput({ firstName: "Filt", lastName: "Tiger", track: "tiger", beltRankId: tigerWhite.id }));
+    const regularId = await createStudent(makeInput({ firstName: "Filt", lastName: "Regular", beltRankId: regularRank.id }));
+
+    const tigerOnly = await getRosterStats({ ...ALL_TIME, track: "tiger" });
+    expect(tigerOnly.beltDistribution).toHaveLength(1);
+    expect(tigerOnly.beltDistribution[0].track).toBe("tiger");
+
+    const regularOnly = await getRosterStats({ ...ALL_TIME, track: "regular" });
+    expect(regularOnly.beltDistribution).toHaveLength(1);
+    expect(regularOnly.beltDistribution[0].track).toBe("regular");
+
+    // The tiger-only view has no Jr./Adult students to count, and vice versa.
+    expect(tigerOnly.ageByGroup.filter((g) => g.group !== "Tiger Cubs").every((g) => g.count === 0)).toBe(true);
+    expect(regularOnly.ageByGroup.find((g) => g.group === "Tiger Cubs")!.count).toBe(0);
+    expect(tigerOnly.byTrack).toEqual(regularOnly.byTrack); // unaffected by the filter
+
+    await setStudentActive(tigerId, false);
+    await setStudentActive(regularId, false);
+  });
+
+  it("excludes an age-group filter's non-matching track entirely (Tiger Cubs aren't Jr. or Adult)", async () => {
+    const ranks = await listBeltRanks();
+    const tigerWhite = ranks.find((r) => r.name === "Tiger Cub White Belt")!;
+    const tigerId = await createStudent(makeInput({ firstName: "AgeFilt", lastName: "Tiger", track: "tiger", beltRankId: tigerWhite.id }));
+
+    const adultsOnly = await getRosterStats({ ...ALL_TIME, ageGroup: "adult" });
+    expect(adultsOnly.beltDistribution.some((d) => d.track === "tiger")).toBe(false);
+
+    await setStudentActive(tigerId, false);
+  });
+
+  it("excludes attendance sessions outside the chosen date range", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "Range", lastName: "Test", beltRankId: rank.id }));
+    const inRange = await getOrCreateSession("2033-05-10", "adult");
+    await setAttendance(inRange, id, "present");
+    const outOfRange = await getOrCreateSession("2033-06-10", "adult");
+    await setAttendance(outOfRange, id, "present");
+
+    const narrow: StatsFilter = { start: "2033-05-01", end: "2033-05-31", classTypes: [], track: "all", ageGroup: "all" };
+    const may = await getAttendanceStats(narrow);
+    expect(may.byMonth.map((m) => m.key)).toEqual(["2033-05"]);
+    expect(may.byMonth[0].sessions).toBe(1);
+
+    const wide: StatsFilter = { start: "2033-05-01", end: "2033-06-30", classTypes: [], track: "all", ageGroup: "all" };
+    const mayAndJune = await getAttendanceStats(wide);
+    expect(mayAndJune.byMonth.map((m) => m.sessions)).toEqual([1, 1]);
+
+    await setStudentActive(id, false);
+  });
+
+  it("filters attendance down to the selected class types", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "Class", lastName: "Filter", beltRankId: rank.id }));
+    const date = "2034-02-02";
+    const adultSession = await getOrCreateSession(date, "adult");
+    await setAttendance(adultSession, id, "present");
+    const tigerSession = await getOrCreateSession(date, "tiger");
+    await setAttendance(tigerSession, id, "present");
+
+    const adultOnly = await getAttendanceStats({ start: date, end: date, classTypes: ["adult"], track: "all", ageGroup: "all" });
+    expect(adultOnly.byClassType.map((c) => c.key)).toEqual(["adult"]);
+
+    const both = await getAttendanceStats({ start: date, end: date, classTypes: [], track: "all", ageGroup: "all" });
+    expect(both.byClassType.map((c) => c.key).sort()).toEqual(["adult", "tiger"]);
+
+    await setStudentActive(id, false);
+  });
+
+  it("excludes testings outside the chosen date range", async () => {
+    const rank = await lowestRegularColorRank();
+    const id = await createStudent(makeInput({ firstName: "EvRange", lastName: "Test", beltRankId: rank.id }));
+    await promoteStudent(id, { date: "2035-01-01" });
+
+    const excluding = await getEventStats({ start: "2035-02-01", end: "2035-12-31", classTypes: [], track: "all", ageGroup: "all" });
+    const including = await getEventStats({ start: "2035-01-01", end: "2035-12-31", classTypes: [], track: "all", ageGroup: "all" });
+    expect(including.promotionRate.promoted - excluding.promotionRate.promoted).toBe(1);
+
+    await setStudentActive(id, false);
   });
 });
 

@@ -90,6 +90,11 @@ export const students = sqliteTable(
     notes: text("notes"),
     isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
     legacyId: integer("legacy_id"),
+    // Migration 0015. NULL = not recorded.
+    gender: text("gender"),
+    // Date deactivated (set by setStudentActive, cleared on reactivation).
+    // NULL for anyone deactivated before migration 0015.
+    leftDate: text("left_date"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
@@ -308,9 +313,57 @@ export const testingCycles = sqliteTable("testing_cycles", {
   endDate: text("end_date").notNull(),
   testingDate: text("testing_date"),
   isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  // Pre-set dates for the *upcoming* cycle (migration 0014) — applied by
+  // promoteCycle() when it rolls this row forward, then cleared again.
+  nextStartDate: text("next_start_date"),
+  nextEndDate: text("next_end_date"),
+  nextTestingDate: text("next_testing_date"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+/**
+ * Snapshot of a completed cycle's dates, recorded automatically each time
+ * promoteCycle() rolls testingCycles forward (migration 0014). testingCycles
+ * is a single row reused/edited in place, so this is the only place a past
+ * cycle's window survives.
+ */
+export const testingCycleHistory = sqliteTable("testing_cycle_history", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  startDate: text("start_date").notNull(),
+  endDate: text("end_date").notNull(),
+  testingDate: text("testing_date"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+/**
+ * One row per trial (migration 0015). students.trial_start_date is cleared when
+ * a trial is ended, so this is the only durable record that a trial happened.
+ */
+export const trialHistory = sqliteTable("trial_history", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  studentId: integer("student_id")
+    .notNull()
+    .references(() => students.id),
+  startDate: text("start_date").notNull(),
+  endedDate: text("ended_date"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+/** Optional schedule details for a class slot (class type x weekday). Migration 0015. */
+export const classSlots = sqliteTable(
+  "class_slots",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    classType: text("class_type").notNull(),
+    weekday: integer("weekday").notNull(), // 0 = Sunday .. 6 = Saturday
+    startTime: text("start_time"),
+    capacity: integer("capacity"),
+  },
+  (t) => ({
+    slotUnique: uniqueIndex("class_slots_type_weekday_uniq").on(t.classType, t.weekday),
+  }),
+);
 
 export const testingRegistration = sqliteTable(
   "testing_registration",
@@ -432,6 +485,9 @@ export type EventRosterEntry = typeof eventRoster.$inferSelect;
 export type StarterCourse = typeof starterCourses.$inferSelect;
 export type StarterCourseEnrollment = typeof starterCourseEnrollment.$inferSelect;
 export type TestingCycle = typeof testingCycles.$inferSelect;
+export type TestingCycleHistory = typeof testingCycleHistory.$inferSelect;
+export type TrialHistoryEntry = typeof trialHistory.$inferSelect;
+export type ClassSlot = typeof classSlots.$inferSelect;
 export type TestingRegistration = typeof testingRegistration.$inferSelect;
 export type SpecialTester = typeof specialTesters.$inferSelect;
 export type NoChangeEntry = typeof noChangeHistory.$inferSelect;

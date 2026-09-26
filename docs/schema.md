@@ -54,6 +54,8 @@ Core student profile. One row per student.
 | `notes` | TEXT | NULL | — | Free-form notes (medical info, goals, parent name, etc.) |
 | `is_active` | BOOLEAN | NOT NULL | `TRUE` | Soft-delete flag. For legacy imports, set from the MSS `Activity Level` (1 = active) — not the termination date |
 | `legacy_id` | INTEGER | NULL | — | Source MSS `Student ID` for imported students (lets legacy data re-sync exactly); NULL for app-created students |
+| `gender` | TEXT | NULL | — | Migration 0015. `'Male'`, `'Female'`, or `'Other'` (CHECK-enforced); NULL = not recorded yet. Used by the demographics report |
+| `left_date` | DATE | NULL | — | Migration 0015. Set to today by `setStudentActive(id, false)` (kept if already set); cleared on reactivation. NULL for anyone deactivated before this existed — reports fall back to their last attended class |
 | `created_at` | TIMESTAMP | NOT NULL | now() | Record creation timestamp |
 | `updated_at` | TIMESTAMP | NOT NULL | now() | Last update timestamp |
 
@@ -336,12 +338,35 @@ The current belt-testing period. The app works against a single active cycle at 
 | `end_date` | DATE | NOT NULL | — | Last day of the testing cycle |
 | `testing_date` | DATE | NULL | — | Day the testing happens; class counts use start→testing_date (or end if unset) |
 | `is_active` | BOOLEAN | NOT NULL | `TRUE` | Marks the current cycle |
+| `next_start_date` | DATE | NULL | — | Migration 0014. Pre-set start date for the *upcoming* cycle |
+| `next_end_date` | DATE | NULL | — | Migration 0014. Pre-set end date for the upcoming cycle |
+| `next_testing_date` | DATE | NULL | — | Migration 0014. Pre-set testing date for the upcoming cycle |
 | `created_at` | TIMESTAMP | NOT NULL | now() | Record creation timestamp |
 | `updated_at` | TIMESTAMP | NOT NULL | now() | Last update timestamp |
 
 **Primary Key:** `id`
 
 **Check Constraint:** `end_date >= start_date`
+
+> **Next cycle fields (migration 0014):** staff can pre-set the upcoming cycle's dates any time via `updateNextCycleDates()`, ahead of the current cycle actually finishing. When `promoteCycle()` rolls the (single, reused) active cycle forward, it uses `next_start_date`/`next_end_date`/`next_testing_date` in place of the usual 90-day placeholder guess — falling back to the placeholder for whichever of the three wasn't set — then clears all three back to `NULL`. See `testing_cycle_history` below for how the cycle being rolled *away from* is preserved.
+
+---
+
+## 11b. `testing_cycle_history`
+
+Snapshot of a completed cycle's dates, recorded automatically every time `promoteCycle()` rolls the active `testing_cycles` row forward. Exists solely because `testing_cycles` is a single row overwritten in place each period (see above) — this table is the only place a past cycle's window survives, backing the "previous cycle" breakdown on a student's attendance record.
+
+| Column | Type | Nullable | Default | Description |
+|---|---|---|---|---|
+| `id` | INTEGER | NOT NULL | autoincrement | Primary key |
+| `start_date` | DATE | NOT NULL | — | The finished cycle's start date |
+| `end_date` | DATE | NOT NULL | — | The finished cycle's end date |
+| `testing_date` | DATE | NULL | — | The finished cycle's testing date, if it had one |
+| `created_at` | TIMESTAMP | NOT NULL | now() | When this snapshot was logged (i.e. when Process Testing was clicked) |
+
+**Primary Key:** `id`
+
+> Only rolls that actually happen are logged (i.e. `promoteCycle()` only writes here when the cycle had a `testing_date` set — same condition that gates the roll itself). `getPreviousCycle()` returns the most recent row. Cycles that rolled before this migration existed aren't recoverable.
 
 ---
 
@@ -376,7 +401,7 @@ Students registered to test in a given cycle (the "registered to test" list).
 
 > **Rank Skip (`target_rank_id`, migration 0013):** on the "Registered to test" list, the "Skip" button lets staff override a student's testing target to any rank in their *own track* with a higher `sort_order` than their current belt — not just the automatic next one. This is how a Tiger Cub registers to test directly for Black Stripe (early graduation), and how a Jr./Adult student can skip ahead multiple belts in one testing. `promoteStudent()` resolves the target as `target_rank_id ?? current.nextRankId`, then runs the normal single-`rank_history`-row promotion (or the two-row stripe-hop + graduate sequence, if the target is Black Stripe specifically) — it does **not** fabricate rows for the skipped intermediate belts. A target in a different track than the student's current belt is refused (`skipped: "target rank is a different track"`) rather than silently applied. `buildCertificateRows()` and `getBeltOrderBreakdown()` independently look up each student's "next rank" and must resolve the same override the same way, or they'd silently show the wrong belt for a skip — both were fixed accordingly.
 >
-> **Correcting an early graduation retroactively:** on 2026-07-27, Teo Lawson and Riley Thompson were found to have tested for (and been awarded) Black Stripe/graduation directly at a testing that predated the Rank Skip feature, but the app had only recorded a normal one-stripe promotion for each. Fixed by hand: their existing (wrong) `rank_history` row's `to_rank_id` was changed to Black Stripe's id (keeping the original `from_rank_id`, which was still their true starting stripe), a second row was inserted for the Black Stripe → regular White Belt graduation (same `promotion_date`, `note = 'Graduated from Tiger Cubs'`), and `students.track`/`belt_rank_id` were synced to match — the same shape `promoteStudent()`'s graduation branch itself produces.
+> **Correcting an early graduation retroactively:** on 2026-07-27, two students were found to have tested for (and been awarded) Black Stripe/graduation directly at a testing that predated the Rank Skip feature, but the app had only recorded a normal one-stripe promotion for each. Fixed by hand: their existing (wrong) `rank_history` row's `to_rank_id` was changed to Black Stripe's id (keeping the original `from_rank_id`, which was still their true starting stripe), a second row was inserted for the Black Stripe → regular White Belt graduation (same `promotion_date`, `note = 'Graduated from Tiger Cubs'`), and `students.track`/`belt_rank_id` were synced to match — the same shape `promoteStudent()`'s graduation branch itself produces.
 
 > **Early/late testers (`special_testers`, migration 0010):** students testing outside the cycle's main testing day, each with their own `test_date`. `listSpecialTesters()` — which backs both the on-screen table and the "Export" `.xlsx` (Name, Age, Current Belt, Testing For, Date, Timing, Tested) — orders them **by `test_date` ascending, then by rank ascending (lowest to highest), then by age ascending (youngest to oldest)**, computed in JS after the query since rank/age aren't sortable SQL columns. The Date column is exported as formatted text rather than a native Excel date cell, to sidestep the ISO-string/UTC-parsing footgun noted for `prettyDate` elsewhere in this doc. A "Clear" button (`clearSpecialTesters()`) empties the whole list at once — e.g. once a cycle's been fully processed — and warns first if any entries aren't yet marked tested.
 
@@ -403,6 +428,13 @@ Belt/size matching against inventory:
 - **1st Degree Black L1** also matches a Belts-section item — `name` = `'Black'` (sizes 1-7, seeded by migration `0011`) — since a Red Belt L3 testing into it gets a newly-issued plain black belt. It's displayed on the Order Breakdown sheet as **"Black Belt"** rather than its internal rank name.
 - Tiger Cub belts match a **Cub Belts** section item where `name` = `'Cub Belt'` and `size` = the stripe color (e.g. "Yellow Stripe"); Cub Belts aren't stocked by physical size, so the breakdown shows size as `—` for these rows.
 - **White Belt** and every Black degree/level **past 1st Degree L1** aren't stocked as sized items (white ships with the starter uniform; those black belts are custom-monogrammed and ordered separately) — students testing into one of these still appear on the Roster sheet but are omitted from the Order Breakdown sheet.
+
+## 12c. `trial_history` / `class_slots`
+
+Both added by migration 0015 for the Reports tab.
+
+- **`trial_history`**: one row per trial. `id`, `student_id` → `students.id`, `start_date`, `ended_date` (NULL while the trial is open), `created_at`. `students.trial_start_date` is *cleared* when staff click "End trial" on the Trials page, which used to erase every trace that a trial happened; this table is the durable record. `syncTrialHistory()` (called by `createStudent`, `updateStudent`, `setTrial`) opens a row when a trial starts, sets `ended_date` when it ends, and rewrites the open row's `start_date` if the date is corrected. The migration seeded one row per trial in progress at the time, so trials before that date were never recorded. Deleted with the student by `deleteStudentPermanently()`.
+- **`class_slots`**: optional schedule detail for a class slot (a `class_type` on a `weekday`, 0 = Sunday). `class_type`, `weekday`, `start_time` (`HH:MM`, nullable), `capacity` (nullable, > 0). `UNIQUE (class_type, weekday)`; edited by `saveClassSlot()` (upsert) from Settings → Class schedule. Nothing depends on it existing: the class-slot report shows plain headcount until a capacity is set.
 
 ## 13. Enumerations & Lookup Values
 
@@ -572,23 +604,36 @@ WHERE ar.student_id = :student_id
 
 ### Classes Since Last Testing
 
-Computed at query time, not stored.
+Computed at query time, not stored, by `classesSinceLastTesting()`. Distinct from Classes Since Promotion above: a student who tests and gets a **No Change** (see `no_change_history` below) doesn't get a new `rank_history` row, so `classesSincePromotion` doesn't reset for them even though they just tested. This metric resets on *either* event:
 
 ```sql
+-- "since" = the later of the student's last promotion or last No Change test date
+SELECT MAX(d) FROM (
+  SELECT MAX(promotion_date) AS d FROM rank_history WHERE student_id = :student_id
+  UNION ALL
+  SELECT MAX(test_date) AS d FROM no_change_history WHERE student_id = :student_id
+);
+
 SELECT COUNT(ar.id) AS classes_since_testing
 FROM attendance_records ar
 JOIN attendance_sessions ats ON ar.session_id = ats.id
 WHERE ar.student_id = :student_id
   AND ar.status = 'present'
-  AND ats.session_date > (
-    SELECT MAX(e.event_date)
-    FROM events e
-    JOIN event_roster er ON e.id = er.event_id
-    WHERE er.student_id = :student_id
-      AND e.event_type = 'Belt Testing'
-  );
--- If no Belt Testing events found for the student, fall back to classes_since_promotion.
+  AND ats.session_date > :since;
+-- Plus posted-event credit after :since, same as classesSincePromotion.
+-- If the student has never tested (:since is NULL), counts everything, same as classesSincePromotion.
 ```
+
+### Expanded Attendance View
+
+`getStudentAttendanceDetail()` backs the "Full history" drawer on a student's record (opened from the compact Attendance history panel). Returns, all independently computed:
+
+- **Current cycle** / **Previous cycle** — each a window `{start, end, testingDate}` (previous cycle read from `testing_cycle_history`, `null` if none logged yet) plus the list of present classes + posted events falling within `start`..`testingDate ?? end`, and their combined credit count.
+- **Since last testing** — see above.
+- **Events** — every posted event on the student's roster, lifetime, not scoped to any cycle.
+- **Total classes** — same lifetime total as `getStudentAttendance().total`.
+- **Avg classes/week, current cycle** — current-cycle count ÷ weeks elapsed so far (`start` → today, capped at the cycle's own cutoff) — not the full nominal window, which is often a future testing date and would understate an in-progress cycle's pace.
+- **Avg classes/week, all time** — lifetime total ÷ weeks since `students.join_date`.
 
 ### Auto-Promote (Testing Event)
 
@@ -658,3 +703,23 @@ Column order for the tab-separated export, ordered by `belt_ranks.sort_order ASC
 | `starter_course_enrollment` | `course_id, student_id` | BTREE UNIQUE | Enrollment lookup |
 | `starter_course_enrollment` | `student_id` | BTREE | All courses for a student |
 | `starter_courses` | `end_date` | BTREE | Active vs. completed filter |
+| `trial_history` | `student_id` | BTREE | Trials for a student |
+
+---
+
+## 17. Reports: how each number is defined
+
+The Reports tab (`/reports`, scorecard plus nine detail pages) is computed by pure functions in `src/lib/reports.ts` (unit-tested with hand-built data in `src/lib/reports.test.ts`) fed by queries in the "Reports" section of `repos.ts`. Everything is derived from existing data; the only stored additions are `gender`, `left_date`, `trial_history`, `class_slots`.
+
+- **When a student left** (`leftDateOf`): none if active; otherwise the **earlier** of their last attended class and `left_date`, never before their join date. Earlier-of, so a batch clean-up that deactivates long-gone students on one day doesn't make them look like they quit that day. Inactive students with neither (593 in the imported history: never attended, no leave date) have no leave date and are treated as never having enrolled. "Last attended" ignores sessions dated in the future.
+- **Invalid join dates**: anything before `1950-01-01` (e.g. imported year `0200`) is ignored by every report.
+- **Attendance trend**: visits in each of the last 12 seven-day windows ending today. *Lapsed* = 14+ days since the last class; *never* = enrolled 14+ days with no class; *dropping* = the last 4 weeks average under half the previous 8 weeks (and that baseline is at least 1 visit/week, and they've been enrolled 12+ weeks). Runs of 10+ days with no class recorded anywhere are drawn as gaps (the imported history ends 2026-05-29 and app use begins 2026-06-20).
+- **Retention** at 3/6/12 months: of students old enough to judge (joined at least N months ago), the share still active or whose leave date is on/after join + N months. Sign-ups who never attended a class are excluded by default (toggle to count them as lost at once). Someone who stopped coming but is still `is_active` counts as retained.
+- **Trial conversion**: payment isn't tracked, so *converted* = at least one class on/after the trial's last day (`start + 42 days`), even if they left later. A finished trial with no such class, after a 14-day grace period, is *dropped*, as is anyone deactivated during the trial. Rate = converted / (converted + dropped). Only trials in `trial_history` count.
+- **Belt pyramid**: active students per rank on one ladder (Tiger Cubs, then White up). Regular ranks past 4th Degree (`sort_order > 26`) show only if someone holds one. A *bulge* is a belt group with more students **per belt level** than the group below it (per level, so a group with more belts isn't unfairly bigger); Tiger Cubs are excluded from that comparison.
+- **Membership / when students quit**: tenure = join date to leave date. The when-they-leave chart uses departures **per month of tenure** (bucket count ÷ bucket width), since raw counts favor wide buckets. The per-belt rate = left at that belt ÷ everyone in play (active, or left within the window) who is at that belt **or beyond**, regular track only (Tiger Cub earlier stripes aren't recoverable once they graduate).
+- **Time in rank**: for each student, days between reaching a rank and reaching the next, from `rank_history`; same-day steps (graduation, rank skips) and repeat tests at the same rank are ignored. A rank is judged only with 5+ examples and a median of 14+ days. An active student is *stuck* when their time at the current rank exceeds the flag (default 1.5x, selectable 2x / 3x) times that rank's median. Medians cluster near 10 weeks because testing happens in ~10-week cycles, so 1.5x usually means "skipped a testing".
+- **Testing pass rate**: promoted ÷ (promoted + `no_change_history`), counting each student once per date, only for testings on/after the first non-legacy class in the app (imported history recorded only passes, so it would read 100%).
+- **Demographics**: age bands **4-5, 6-7, 8-12, 13-17, 18+** (plus "Under 4" when anyone is), from `date_of_birth`; ages outside 0-100 are treated as unknown. Kids = under 18. *Families* are a guess: active students linked by a shared phone number (last 10 digits) or email among the student's and guardians' contact fields; junk numbers (all one digit) and any value shared by more than 8 students are ignored. Sibling group = a family with 2+ minors; parent-child = a family with an adult and a minor.
+- **Enrollment flow**: sign-ups by `join_date` month; losses by leave-date month; net = joined - lost; enrolled at month end = joined by then and (active, or left after that month end). No referral source is tracked (deliberately not added).
+- **Class slots**: average and peak headcount per (class type, weekday) over a chosen period, from non-legacy, non-private sessions. Sessions with nobody marked present are skipped (almost always a page opened, not a class that ran empty). Fill = average headcount ÷ `class_slots.capacity` when set: 85%+ nearly full, under 50% room for more.

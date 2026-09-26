@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Award, Ban, Download, FileSpreadsheet, ListOrdered, ListX, Printer, SkipForward, Trash2, UserMinus, UserPlus } from "lucide-react";
+import { Award, Ban, ClipboardCheck, ClipboardList, Download, FileSpreadsheet, ListOrdered, ListX, Printer, SkipForward, Trash2, UserMinus, UserPlus } from "lucide-react";
 
 import { Drawer } from "@/components/Drawer";
 import { PageHeader } from "@/components/PageHeader";
@@ -8,6 +8,7 @@ import { Button, EmptyState, Field, Select, Textarea, TextInput } from "@/compon
 import { StudentSearchAdd } from "@/components/StudentSearchAdd";
 import {
   addSpecialTester,
+  buildAttendanceReportHtml,
   buildBeltLabelsHtml,
   buildCertificateRows,
   buildNonTestersCsv,
@@ -30,6 +31,7 @@ import {
   setSpecialTesterTested,
   unregisterFromTest,
   updateCycle,
+  updateNextCycleDates,
   type CandidateRow,
   type PromotionResult,
   type SpecialTestRow,
@@ -42,6 +44,7 @@ import { saveTextFile } from "@/lib/download";
 import { exportBeltOrderXlsx } from "@/lib/beltOrderExport";
 import { exportCertificateData } from "@/lib/certificateExport";
 import { exportSpecialTestersXlsx } from "@/lib/specialTestersExport";
+import { exportTestingSheetXlsx } from "@/lib/testingSheetExport";
 import { ageFromDob, beltRankOrder, prettyDate, today } from "@/lib/format";
 
 type CandSort = "first" | "last" | "age" | "belt" | "attendance";
@@ -74,6 +77,9 @@ export function TestingCyclePage() {
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [testingDate, setTestingDate] = useState("");
+  const [nextStart, setNextStart] = useState("");
+  const [nextEnd, setNextEnd] = useState("");
+  const [nextTestingDate, setNextTestingDate] = useState("");
   const [roster, setRoster] = useState<TestingRow[]>([]);
   const [candidates, setCandidates] = useState<CandidateRow[]>([]);
   const [special, setSpecial] = useState<SpecialTestRow[]>([]);
@@ -118,6 +124,9 @@ export function TestingCyclePage() {
         setStart(c.startDate);
         setEnd(c.endDate);
         setTestingDate(c.testingDate ?? "");
+        setNextStart(c.nextStartDate ?? "");
+        setNextEnd(c.nextEndDate ?? "");
+        setNextTestingDate(c.nextTestingDate ?? "");
         await loadLists(c.id);
       } catch (e) {
         setError(String(e));
@@ -174,6 +183,15 @@ export function TestingCyclePage() {
     await updateCycle(cycle.id, start, end, td);
     setCycle({ ...cycle, startDate: start, endDate: end, testingDate: td });
     await loadLists(cycle.id); // attendance counts depend on the date range
+  }
+
+  async function saveNextDates() {
+    if (!cycle) return;
+    if (nextStart && nextEnd && nextEnd < nextStart) { setError("Next cycle's end date can't be before its start date."); return; }
+    setError(null);
+    const ns = nextStart || null, ne = nextEnd || null, ntd = nextTestingDate || null;
+    await updateNextCycleDates(cycle.id, ns, ne, ntd);
+    setCycle({ ...cycle, nextStartDate: ns, nextEndDate: ne, nextTestingDate: ntd });
   }
 
   async function register(studentId: number) {
@@ -251,10 +269,19 @@ export function TestingCyclePage() {
       setStart(fresh.startDate);
       setEnd(fresh.endDate);
       setTestingDate(fresh.testingDate ?? "");
+      setNextStart(fresh.nextStartDate ?? "");
+      setNextEnd(fresh.nextEndDate ?? "");
+      setNextTestingDate(fresh.nextTestingDate ?? "");
       await loadLists(fresh.id);
     } finally {
       setBusy(false);
     }
+  }
+
+  async function exportTestingSheets() {
+    if (!cycle) return;
+    const saved = await exportTestingSheetXlsx(roster, special, cycle);
+    setExportMsg(saved ? "Testing sheets saved." : "Export canceled.");
   }
 
   async function exportTsv() {
@@ -269,6 +296,13 @@ export function TestingCyclePage() {
     const csv = await buildNonTestersCsv(cycle.id);
     const saved = await saveTextFile(`not_testing_${cycle.startDate}_to_${cycle.endDate}.csv`, csv);
     setExportMsg(saved ? "Non-testers list saved." : "Export canceled.");
+  }
+
+  async function printAttendance() {
+    if (!cycle) return;
+    const html = await buildAttendanceReportHtml(cycle.id);
+    const saved = await saveTextFile(`attendance_${cycle.startDate}_to_${cycle.endDate}.html`, html, "html");
+    setExportMsg(saved ? "Attendance report saved — opens in your browser; print from there with Ctrl+P." : "Export canceled.");
   }
 
   async function exportCertificates() {
@@ -316,11 +350,13 @@ export function TestingCyclePage() {
         subtitle={cycle ? `${prettyDate(cycle.startDate)} – ${prettyDate(cycle.endDate)} · ${roster.length} registered to test` : "Loading…"}
         actions={
           <>
+            <Button variant="secondary" onClick={exportTestingSheets} disabled={roster.length === 0}><ClipboardList size={16} />Create Testing Sheets</Button>
             <Button variant="secondary" onClick={exportCertificates} disabled={roster.length === 0}><FileSpreadsheet size={16} />Certificate data</Button>
             <Button variant="secondary" onClick={printLabels} disabled={roster.length === 0}><Printer size={16} />Belt labels</Button>
             <Button variant="secondary" onClick={exportBeltOrder} disabled={roster.length === 0}><ListOrdered size={16} />Belt order</Button>
             <Button variant="secondary" onClick={exportTsv} disabled={roster.length === 0}><Download size={16} />Export</Button>
             <Button variant="secondary" onClick={exportNonTesters}><UserMinus size={16} />Not testing</Button>
+            <Button variant="secondary" onClick={printAttendance}><ClipboardCheck size={16} />Attendance</Button>
             <Button
               variant="primary"
               onClick={promote}
@@ -349,6 +385,24 @@ export function TestingCyclePage() {
           <TextInput type="date" value={testingDate} onChange={(e) => setTestingDate(e.target.value)} onBlur={saveDates} className="w-44" />
         </label>
         <p className="mb-2 text-xs text-[var(--color-fg-muted)]">Attendance counts classes between the start and the testing date (or end).</p>
+      </div>
+
+      <div className="mb-5 flex flex-wrap items-end gap-4 rounded-lg border border-dashed border-[var(--color-border)] p-4">
+        <label className="block">
+          <span className="mb-1 block text-sm font-medium">Next cycle start</span>
+          <TextInput type="date" value={nextStart} onChange={(e) => setNextStart(e.target.value)} onBlur={saveNextDates} className="w-44" />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-sm font-medium">Next cycle end</span>
+          <TextInput type="date" value={nextEnd} onChange={(e) => setNextEnd(e.target.value)} onBlur={saveNextDates} className="w-44" />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-sm font-medium">Next testing date</span>
+          <TextInput type="date" value={nextTestingDate} onChange={(e) => setNextTestingDate(e.target.value)} onBlur={saveNextDates} className="w-44" />
+        </label>
+        <p className="mb-2 text-xs text-[var(--color-fg-muted)]">
+          Set these whenever you know them. Process Testing uses them for the next round instead of guessing, then clears them here.
+        </p>
       </div>
 
       {/* Students testing outside the main testing day */}

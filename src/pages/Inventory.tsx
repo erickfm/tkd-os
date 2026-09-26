@@ -5,6 +5,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { Button, TextInput } from "@/components/ui";
 import {
   addInventoryItems,
+  clearInventoryColumn,
   deleteInventoryItem,
   listInventory,
   updateInventoryItem,
@@ -53,6 +54,12 @@ export function InventoryPage() {
     const saved = await exportSectionXlsx(name, items);
     setMsg(saved ? `${name} exported to Excel.` : "Export canceled.");
   }
+  async function clearColumn(sectionId: number, field: "inStock" | "toOrder", sectionName: string) {
+    const label = field === "inStock" ? "In stock" : "To order";
+    if (!confirm(`Clear "${label}" for every item in ${sectionName}? This sets them all to 0.`)) return;
+    await clearInventoryColumn(sectionId, field);
+    await load();
+  }
 
   return (
     <>
@@ -72,6 +79,7 @@ export function InventoryPage() {
             onAdd={(name, size) => add(section.id, name, size)}
             onRemove={remove}
             onExport={() => exportSection(section.name, items)}
+            onClearColumn={(field) => clearColumn(section.id, field, section.name)}
           />
         ))}
       </div>
@@ -79,7 +87,7 @@ export function InventoryPage() {
   );
 }
 
-function SectionCard({ name, updatedAt, items, onSaveCount, onAdd, onRemove, onExport }: {
+function SectionCard({ name, updatedAt, items, onSaveCount, onAdd, onRemove, onExport, onClearColumn }: {
   name: string;
   updatedAt: string;
   items: InventoryItem[];
@@ -87,6 +95,7 @@ function SectionCard({ name, updatedAt, items, onSaveCount, onAdd, onRemove, onE
   onAdd: (name: string, size: string) => void;
   onRemove: (itemId: number) => void;
   onExport: () => void;
+  onClearColumn: (field: "inStock" | "toOrder") => void;
 }) {
   const [newName, setNewName] = useState("");
   const [newSize, setNewSize] = useState("");
@@ -113,8 +122,28 @@ function SectionCard({ name, updatedAt, items, onSaveCount, onAdd, onRemove, onE
             <tr>
               <th className="px-3 py-2 font-medium">Item</th>
               <th className="px-3 py-2 font-medium">Size</th>
-              <th className="px-3 py-2 font-medium text-right">In stock</th>
-              <th className="px-3 py-2 font-medium text-right">To order</th>
+              <th className="px-3 py-2 font-medium text-right">
+                <div className="flex items-center justify-end gap-2">
+                  <span>In stock</span>
+                  <button
+                    onClick={() => onClearColumn("inStock")}
+                    className="rounded border border-red-500/40 px-1.5 py-0.5 text-[10px] font-normal normal-case text-red-600 hover:bg-red-500/10"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </th>
+              <th className="px-3 py-2 font-medium text-right">
+                <div className="flex items-center justify-end gap-2">
+                  <span>To order</span>
+                  <button
+                    onClick={() => onClearColumn("toOrder")}
+                    className="rounded border border-red-500/40 px-1.5 py-0.5 text-[10px] font-normal normal-case text-red-600 hover:bg-red-500/10"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </th>
               <th className="px-3 py-2"></th>
             </tr>
           </thead>

@@ -102,6 +102,18 @@ pub fn run() {
             sql: include_str!("../migrations/0013_target_rank.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 14,
+            description: "next_cycle_and_history",
+            sql: include_str!("../migrations/0014_next_cycle_and_history.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 15,
+            description: "reports_foundation",
+            sql: include_str!("../migrations/0015_reports_foundation.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
