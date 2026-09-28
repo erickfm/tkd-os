@@ -12,10 +12,11 @@ import {
 import {
   TRACKS,
   AGE_GROUPS,
-  CLASS_TYPES,
+  STORED_CLASS_TYPES,
   CLASS_GROUPS,
   EVENT_TYPES,
   ATTENDANCE_STATUSES,
+  NC_REASONS,
 } from "./enums";
 
 const enumCheck = (col: string, values: readonly string[]) =>
@@ -85,9 +86,15 @@ export const students = sqliteTable(
     isStarterStudent: integer("is_starter_student", { mode: "boolean" })
       .notNull()
       .default(false),
+    trialStartDate: text("trial_start_date"),
     notes: text("notes"),
     isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
     legacyId: integer("legacy_id"),
+    // Migration 0015. NULL = not recorded.
+    gender: text("gender"),
+    // Date deactivated (set by setStudentActive, cleared on reactivation).
+    // NULL for anyone deactivated before migration 0015.
+    leftDate: text("left_date"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
@@ -179,7 +186,7 @@ export const attendanceSessions = sqliteTable(
     classTypeIdx: index("attendance_sessions_class_type_idx").on(t.classType),
     classTypeCheck: check(
       "attendance_sessions_class_type_chk",
-      enumCheck("class_type", CLASS_TYPES)
+      enumCheck("class_type", STORED_CLASS_TYPES)
     ),
   })
 );
@@ -225,6 +232,8 @@ export const events = sqliteTable(
     location: text("location", { length: 255 }),
     notes: text("notes"),
     isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+    classCredit: integer("class_credit").notNull().default(1),
+    postedAt: text("posted_at"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
@@ -302,10 +311,59 @@ export const testingCycles = sqliteTable("testing_cycles", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   startDate: text("start_date").notNull(),
   endDate: text("end_date").notNull(),
+  testingDate: text("testing_date"),
   isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  // Pre-set dates for the *upcoming* cycle (migration 0014) — applied by
+  // promoteCycle() when it rolls this row forward, then cleared again.
+  nextStartDate: text("next_start_date"),
+  nextEndDate: text("next_end_date"),
+  nextTestingDate: text("next_testing_date"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+/**
+ * Snapshot of a completed cycle's dates, recorded automatically each time
+ * promoteCycle() rolls testingCycles forward (migration 0014). testingCycles
+ * is a single row reused/edited in place, so this is the only place a past
+ * cycle's window survives.
+ */
+export const testingCycleHistory = sqliteTable("testing_cycle_history", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  startDate: text("start_date").notNull(),
+  endDate: text("end_date").notNull(),
+  testingDate: text("testing_date"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+/**
+ * One row per trial (migration 0015). students.trial_start_date is cleared when
+ * a trial is ended, so this is the only durable record that a trial happened.
+ */
+export const trialHistory = sqliteTable("trial_history", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  studentId: integer("student_id")
+    .notNull()
+    .references(() => students.id),
+  startDate: text("start_date").notNull(),
+  endedDate: text("ended_date"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+/** Optional schedule details for a class slot (class type x weekday). Migration 0015. */
+export const classSlots = sqliteTable(
+  "class_slots",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    classType: text("class_type").notNull(),
+    weekday: integer("weekday").notNull(), // 0 = Sunday .. 6 = Saturday
+    startTime: text("start_time"),
+    capacity: integer("capacity"),
+  },
+  (t) => ({
+    slotUnique: uniqueIndex("class_slots_type_weekday_uniq").on(t.classType, t.weekday),
+  }),
+);
 
 export const testingRegistration = sqliteTable(
   "testing_registration",
@@ -318,6 +376,9 @@ export const testingRegistration = sqliteTable(
       .notNull()
       .references(() => students.id),
     registeredAt: text("registered_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    // "Rank Skip" override — promote straight to this rank instead of the
+    // automatic next rank. NULL = default (automatic) behavior.
+    targetRankId: integer("target_rank_id").references(() => beltRanks.id),
   },
   (t) => ({
     cycleStudentUnique: uniqueIndex("testing_registration_cycle_student_uniq").on(
@@ -325,6 +386,91 @@ export const testingRegistration = sqliteTable(
       t.studentId,
     ),
     studentIdx: index("testing_registration_student_idx").on(t.studentId),
+  }),
+);
+
+/**
+ * Students testing outside the current cycle's main testing day (early or late).
+ * Deliberately not tied to testing_cycles.id: a cycle row is reused/edited in
+ * place across periods (see testingCycles above), so it isn't a meaningful
+ * per-period key. "Early" vs "Late" is derived by comparing test_date to the
+ * *current* cycle's testing day at query time, not stored.
+ */
+export const specialTesters = sqliteTable(
+  "special_testers",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    studentId: integer("student_id")
+      .notNull()
+      .references(() => students.id),
+    testDate: text("test_date").notNull(),
+    tested: integer("tested", { mode: "boolean" }).notNull().default(false),
+    notes: text("notes"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (t) => ({
+    studentUnique: uniqueIndex("special_testers_student_uniq").on(t.studentId),
+    dateIdx: index("special_testers_date_idx").on(t.testDate),
+  }),
+);
+
+/**
+ * A registered student tested but wasn't promoted ("No Change"). Recorded
+ * instead of a rank_history row; doesn't touch student_progress — they're
+ * still on the same belt, so their stripes/PTT carry forward to their next
+ * attempt. rank_id is the belt they were testing AT (for record-keeping),
+ * cycle_id links back to the cycle it happened in (nullable defensively,
+ * though cycles are never deleted).
+ */
+export const noChangeHistory = sqliteTable(
+  "no_change_history",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    studentId: integer("student_id")
+      .notNull()
+      .references(() => students.id),
+    rankId: integer("rank_id")
+      .notNull()
+      .references(() => beltRanks.id),
+    cycleId: integer("cycle_id").references(() => testingCycles.id),
+    testDate: text("test_date").notNull(),
+    reason: text("reason").notNull(),
+    note: text("note", { length: 500 }),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (t) => ({
+    studentDateIdx: index("no_change_history_student_date_idx").on(
+      t.studentId,
+      t.testDate,
+    ),
+    reasonCheck: check("no_change_history_reason_chk", enumCheck("reason", NC_REASONS)),
+  }),
+);
+
+export const inventorySections = sqliteTable("inventory_sections", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  sortOrder: integer("sort_order").notNull(),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const inventoryItems = sqliteTable(
+  "inventory_items",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    sectionId: integer("section_id")
+      .notNull()
+      .references(() => inventorySections.id),
+    name: text("name").notNull(),
+    size: text("size"),
+    inStock: integer("in_stock").notNull().default(0),
+    toOrder: integer("to_order").notNull().default(0),
+    sortOrder: integer("sort_order").notNull(),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (t) => ({
+    sectionIdx: index("inventory_items_section_idx").on(t.sectionId, t.sortOrder),
   }),
 );
 
@@ -339,4 +485,11 @@ export type EventRosterEntry = typeof eventRoster.$inferSelect;
 export type StarterCourse = typeof starterCourses.$inferSelect;
 export type StarterCourseEnrollment = typeof starterCourseEnrollment.$inferSelect;
 export type TestingCycle = typeof testingCycles.$inferSelect;
+export type TestingCycleHistory = typeof testingCycleHistory.$inferSelect;
+export type TrialHistoryEntry = typeof trialHistory.$inferSelect;
+export type ClassSlot = typeof classSlots.$inferSelect;
 export type TestingRegistration = typeof testingRegistration.$inferSelect;
+export type SpecialTester = typeof specialTesters.$inferSelect;
+export type NoChangeEntry = typeof noChangeHistory.$inferSelect;
+export type InventorySection = typeof inventorySections.$inferSelect;
+export type InventoryItem = typeof inventoryItems.$inferSelect;

@@ -28,3 +28,15 @@ dist-ssr
 
 # Legacy data exports — contain student PII, never commit (repo is public)
 scripts/legacy_*.json
+
+# Databases, backups and data exports — contain student PII, never commit (repo is public)
+*.db
+*.db-shm
+*.db-wal
+*.db.bak*
+*.mdb
+*.accdb
+*.csv
+*.xls
+*.xlsx
+tkdos-backups/

@@ -1,20 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Plus, UserCog, X } from "lucide-react";
+import { Plus, X } from "lucide-react";
 
 import { PageHeader } from "@/components/PageHeader";
 import { BeltBadge } from "@/components/BeltBadge";
 import { Button, EmptyState } from "@/components/ui";
 import { StudentForm } from "./StudentForm";
 import {
-  autoFlagAdultsByDob,
   listBeltRanks,
   listStudents,
   type StudentRow,
 } from "@/db/repos";
 import type { BeltRank } from "@/db/schema";
 import { BELT_SIZES } from "@/db/enums";
-import { AGE_GROUP_LABEL, prettyDate, TRACK_LABEL } from "@/lib/format";
+import { AGE_GROUP_LABEL, beltRankOrder, prettyDate, TRACK_LABEL } from "@/lib/format";
+import { searchStudent } from "@/lib/studentSearch";
 
 type TrackFilter = "all" | "regular" | "tiger";
 type Special = "all" | "black" | "ptt";
@@ -31,7 +31,7 @@ const beltSizeSort = (r: StudentRow) => {
 // Ascending comparator per column; direction is applied by the caller.
 const COMPARATORS: Record<SortKey, (a: StudentRow, b: StudentRow) => number> = {
   name: (a, b) => a.lastName.localeCompare(b.lastName) || a.firstName.localeCompare(b.firstName),
-  belt: (a, b) => a.rank.track.localeCompare(b.rank.track) || a.rank.sortOrder - b.rank.sortOrder,
+  belt: (a, b) => beltRankOrder(a.rank) - beltRankOrder(b.rank),
   track: (a, b) => TRACK_LABEL[a.track].localeCompare(TRACK_LABEL[b.track]),
   ageGroup: (a, b) => ageGroupSort(a).localeCompare(ageGroupSort(b)),
   beltSize: (a, b) => beltSizeSort(a) - beltSizeSort(b),
@@ -78,7 +78,6 @@ export function StudentsPage() {
 
   const filtered = useMemo(() => {
     if (!rows) return [];
-    const q = search.trim().toLowerCase();
     const out = rows
       .filter((r) => (showInactive ? true : r.isActive))
       .filter((r) => (track === "all" ? true : r.track === track))
@@ -86,7 +85,7 @@ export function StudentsPage() {
         special === "all" ? true
           : special === "black" ? r.rank.degree != null
           : r.permissionToTest)
-      .filter((r) => q === "" ? true : `${r.firstName} ${r.lastName}`.toLowerCase().includes(q));
+      .filter((r) => searchStudent(r, search).matches);
     const dir = sortDir === "asc" ? 1 : -1;
     out.sort((a, b) => {
       const v = COMPARATORS[sortKey](a, b);
@@ -111,23 +110,12 @@ export function StudentsPage() {
     setParams(params, { replace: true });
   }
 
-  async function flagAdults() {
-    const n = await autoFlagAdultsByDob(18);
-    await load();
-    alert(`Flagged ${n} student${n === 1 ? "" : "s"} as Adult (18+ by birthdate).`);
-  }
-
   return (
     <>
       <PageHeader
         title="Students"
         subtitle={rows ? `${filtered.length} shown of ${rows.length} total` : "Loading…"}
-        actions={
-          <>
-            <Button variant="secondary" onClick={flagAdults}><UserCog size={16} />Flag adults</Button>
-            <Button variant="primary" onClick={openNew}><Plus size={16} />Add student</Button>
-          </>
-        }
+        actions={<Button variant="primary" onClick={openNew}><Plus size={16} />Add student</Button>}
       />
 
       {error && (
@@ -141,8 +129,8 @@ export function StudentsPage() {
           <div className="mb-4 flex flex-wrap items-center gap-3">
             <input
               type="text" value={search} onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search by name…"
-              className="w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-brand)]"
+              placeholder="Search by student or parent name…"
+              className="w-72rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-brand)]"
             />
             <Segmented value={track} onChange={setTrack} options={[
               { value: "all", label: "All" },
@@ -179,11 +167,14 @@ export function StudentsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((r) => (
+                  {filtered.map((r) => {
+                    const viaGuardian = searchStudent(r, search).viaGuardian;
+                    return (
                     <tr key={r.id} onClick={() => openEdit(r)} className="cursor-pointer border-t border-[var(--color-border)] hover:bg-[var(--color-surface-2)]">
                       <Td>
                         <span className={r.isActive ? "" : "opacity-50 line-through"}>{r.firstName} {r.lastName}</span>
                         {r.permissionToTest && <span className="ml-2 rounded-full bg-[var(--color-brand)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-brand)]">PTT</span>}
+                        {viaGuardian && <div className="text-xs text-[var(--color-fg-muted)]">Parent/guardian: {viaGuardian}</div>}
                       </Td>
                       <Td><BeltBadge rank={r.rank} size="sm" /></Td>
                       <Td>{TRACK_LABEL[r.track]}</Td>
@@ -191,7 +182,8 @@ export function StudentsPage() {
                       <Td>{r.beltSize ?? "—"}</Td>
                       <Td>{prettyDate(r.joinDate)}</Td>
                     </tr>
-                  ))}
+                    );
+                  })}
                   {filtered.length === 0 && rows && (
                     <tr><td colSpan={6} className="p-10 text-center text-sm text-[var(--color-fg-muted)]">No students match your filters.</td></tr>
                   )}

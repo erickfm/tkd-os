@@ -6,10 +6,14 @@ import { Minus, Square, Copy, X } from "lucide-react";
 const NAV = [
   { to: "/dashboard", label: "Dashboard" },
   { to: "/students", label: "Students" },
+  { to: "/testing-progress", label: "Testing Progress" },
   { to: "/attendance", label: "Attendance" },
   { to: "/testing-cycle", label: "Testing Cycle" },
   { to: "/events", label: "Events" },
-  { to: "/starter-courses", label: "Starter Courses" },
+  { to: "/trials", label: "Trials" },
+  { to: "/inventory", label: "Inventory" },
+  { to: "/reports", label: "Reports" },
+  { to: "/statistics", label: "Statistics" },
   { to: "/settings", label: "Settings" },
 ];
 

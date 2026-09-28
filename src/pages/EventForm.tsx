@@ -15,7 +15,7 @@ interface Props {
 }
 
 function blank(): EventInput {
-  return { name: "", eventDate: today(), eventTime: null, eventType: "Seminar", location: null, notes: null };
+  return { name: "", eventDate: today(), eventTime: null, eventType: "Seminar", location: null, notes: null, classCredit: 1 };
 }
 
 export function EventForm({ open, onClose, onSaved, editing }: Props) {
@@ -27,7 +27,7 @@ export function EventForm({ open, onClose, onSaved, editing }: Props) {
   if (open && seededFor !== key) {
     setSeededFor(key);
     setForm(editing
-      ? { name: editing.name, eventDate: editing.eventDate, eventTime: editing.eventTime, eventType: editing.eventType, location: editing.location, notes: editing.notes }
+      ? { name: editing.name, eventDate: editing.eventDate, eventTime: editing.eventTime, eventType: editing.eventType, location: editing.location, notes: editing.notes, classCredit: editing.classCredit }
       : blank());
     setError(null);
   }
@@ -43,6 +43,9 @@ export function EventForm({ open, onClose, onSaved, editing }: Props) {
     try {
       if (editing) await updateEvent(editing.id, form);
       else await createEvent(form);
+      // Force a re-seed next time the drawer opens — otherwise "new" stays
+      // seeded and the next "Add event" silently reopens with this data.
+      setSeededFor(null);
       onSaved();
       onClose();
     } catch (e) {
@@ -72,6 +75,15 @@ export function EventForm({ open, onClose, onSaved, editing }: Props) {
         </Select>
       </Field>
       <Field label="Location"><TextInput value={form.location ?? ""} onChange={(e) => set("location", e.target.value || null)} /></Field>
+      <Field label="Counts as (classes)">
+        <TextInput
+          type="number"
+          min={1}
+          value={form.classCredit}
+          onChange={(e) => set("classCredit", Math.max(1, Number(e.target.value) || 1))}
+          className="w-24"
+        />
+      </Field>
       <Field label="Notes"><Textarea rows={4} value={form.notes ?? ""} onChange={(e) => set("notes", e.target.value || null)} /></Field>
     </Drawer>
   );
